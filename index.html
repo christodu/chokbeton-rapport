@@ -410,7 +410,27 @@ function step3(){
     +'<div class="info-box">📧 Le rapport PDF sera envoyé par email au client et au responsable sélectionné</div>';
 }
 
-function addPhotos(input){var files=Array.from(input.files),rem=10-S.photos.length,toAdd=files.slice(0,rem),ld=0;toAdd.forEach(function(f){var r=new FileReader();r.onload=function(e){S.photos.push({url:e.target.result,caption:''});if(++ld===toAdd.length)R();};r.readAsDataURL(f);});}
+function readExifOrientation(ab){try{var dv=new DataView(ab);if(dv.getUint16(0)!==0xFFD8)return 1;var off=2;while(off<dv.byteLength-4){var marker=dv.getUint16(off);var len=dv.getUint16(off+2);if(marker===0xFFE1){if(dv.getUint32(off+4)===0x45786966&&dv.getUint16(off+8)===0){var tiff=off+10;var le=dv.getUint16(tiff)===0x4949;var n=dv.getUint16(tiff+8,le);for(var i=0;i<n;i++){if(dv.getUint16(tiff+10+i*12,le)===0x0112)return dv.getUint16(tiff+10+i*12+8,le);}}break;}if((marker&0xFF00)!==0xFF00)break;off+=2+len;}}catch(e){}return 1;}
+function fixOrientation(dataUrl,ori,cb){var img=new Image();img.onload=function(){var w=img.naturalWidth,h=img.naturalHeight;var cv=document.createElement('canvas');var ctx=cv.getContext('2d');if(ori>=5){cv.width=h;cv.height=w;}else{cv.width=w;cv.height=h;}ctx.save();switch(ori){case 3:ctx.translate(w,h);ctx.rotate(Math.PI);break;case 6:ctx.translate(h,0);ctx.rotate(Math.PI/2);break;case 8:ctx.translate(0,w);ctx.rotate(-Math.PI/2);break;}ctx.drawImage(img,0,0);ctx.restore();cb(cv.toDataURL('image/jpeg',0.85));};img.src=dataUrl;}
+function addPhotos(input){
+  var files=Array.from(input.files),rem=10-S.photos.length,toAdd=files.slice(0,rem);
+  if(!toAdd.length)return;
+  var done=0,total=toAdd.length;
+  toAdd.forEach(function(f){
+    var r1=new FileReader();
+    r1.onload=function(e1){
+      var dataUrl=e1.target.result;
+      var r2=new FileReader();
+      r2.onload=function(e2){
+        var ori=readExifOrientation(e2.target.result);
+        var finish=function(url){S.photos.push({url:url,caption:''});if(++done===total)R();};
+        if(ori===3||ori===6||ori===8){fixOrientation(dataUrl,ori,finish);}else{finish(dataUrl);}
+      };
+      r2.readAsArrayBuffer(f);
+    };
+    r1.readAsDataURL(f);
+  });
+}
 function delPhoto(i){S.photos.splice(i,1);R();}
 function selResp(id){var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;if(sc)S.sig.url=sc.toDataURL();S.resp=id;R();}
 function delBloc(id){if(!confirm('Supprimer ce niveau ?'))return;S.blocs=S.blocs.filter(function(x){return x.id!==id;});R();}
@@ -779,7 +799,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
   set(null,null,[190,205,212]);
   doc.setFontSize(7);doc.setFont('helvetica','normal');
   doc.text('Découpe béton  |  Sciage  |  Carottage  |  Renforcement de structure (carbone, métal)  |  Démolition',10,20);
-  doc.setFontSize(7);doc.text('1 Rue Hector Berlioz  |  95210 SAINT GRATIEN  |  chokbeton.rapport@gmail.com',10,26.5);
+  doc.setFontSize(7);doc.text('1 Rue Hector Berlioz  |  95210 SAINT GRATIEN',10,26.5);
   // Badge RAPPORT DE CHANTIER (droite)
   set(YEL);doc.roundedRect(PW-64,5,50,22,2,2,'F');
   doc.setFontSize(10);doc.setFont('helvetica','bold');set(null,null,DRK);
@@ -911,33 +931,35 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
   if(tOuvSci>0)rr.push(['Ouvertures sciage',blocs.filter(function(b){return (b.ouvsciages||[]).length>0;}).length+' niveau(x)',tOuvSci+' ouverture(s)']);
   if(rr.length){
     var cx=[M,M+85,M+158];
-    var yTableStart=y;
-    // En-tête tableau
-    set(DRK);doc.rect(M,y,PW-2*M,9,'F');
-    ['PRESTATION','NIVEAUX CONCERNÉS','QUANTITÉ TOTALE'].forEach(function(h,i){
-      doc.setFontSize(7);doc.setFont('helvetica','bold');set(null,null,YEL);
-      doc.text(h,cx[i]+4,y+6);
-    });
-    y+=9;
+    var TH=9,tableW=PW-2*M,yTop=y;
+    // En-tête tableau (fond sombre)
+    doc.setFillColor(DRK[0],DRK[1],DRK[2]);
+    doc.rect(M,y,tableW,TH,'F');
+    doc.setFontSize(7);doc.setFont('helvetica','bold');
+    doc.setTextColor(YEL[0],YEL[1],YEL[2]);
+    ['PRESTATION','NIVEAUX CONCERNÉS','QUANTITÉ TOTALE'].forEach(function(h,i){doc.text(h,cx[i]+4,y+6);});
+    y+=TH;
+    // Lignes
     rr.forEach(function(row,ri){
       if(y>PH-25){doc.addPage();y=15;}
-      set(ri%2===0?WHT:LGT,null);doc.rect(M,y,PW-2*M,9,'F');
-      set(YEL);doc.rect(M,y,3,9,'F'); // Accent jaune gauche
+      var bg=ri%2===0?WHT:LGT;
+      doc.setFillColor(bg[0],bg[1],bg[2]);doc.rect(M,y,tableW,TH,'F');
+      doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,3,TH,'F');
       row.forEach(function(cell,i){
-        doc.setFontSize(i===2?9.5:8.5);
-        doc.setFont('helvetica',i===2?'bold':'normal');
-        set(null,null,i===2?DRK:GRY);
+        doc.setFontSize(i===2?9.5:8.5);doc.setFont('helvetica',i===2?'bold':'normal');
+        var tc=i===2?DRK:GRY;doc.setTextColor(tc[0],tc[1],tc[2]);
         doc.text(cell,cx[i]+6,y+6);
       });
-      y+=9;
+      y+=TH;
     });
-    // Ligne jaune de fermeture
-    set(YEL);doc.rect(M,y,PW-2*M,1.5,'F');
-    y+=1.5;
-    // Bordure externe du tableau complet
-    set(null,BRD);doc.setLineWidth(0.4);doc.rect(M,yTableStart,PW-2*M,y-yTableStart,'S');
-    doc.setLineWidth(0.2);
-    y+=6;
+    // Barre jaune de fermeture
+    doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,tableW,2,'F');
+    y+=2;
+    // Bordure externe visible (gris moyen)
+    doc.setDrawColor(160,175,185);doc.setLineWidth(0.6);
+    doc.rect(M,yTop,tableW,y-yTop,'S');
+    doc.setLineWidth(0.2);doc.setDrawColor(BRD[0],BRD[1],BRD[2]);
+    y+=7;
   }
 
   // Photos
@@ -1009,7 +1031,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
     doc.text("CHOK'BETON",M+2,PH-7.5);
     // Adresse en gris clair
     doc.setFontSize(6.5);doc.setFont('helvetica','normal');set(null,null,[180,195,200]);
-    doc.text('1 Rue Hector Berlioz  |  95210 SAINT GRATIEN  |  chokbeton.rapport@gmail.com',M+2,PH-3);
+    doc.text('1 Rue Hector Berlioz  |  95210 SAINT GRATIEN',M+2,PH-3);
     // Numéro de rapport + responsable centré
     doc.setFontSize(6.5);set(null,null,[180,195,200]);
     doc.text('N '+String(c.num||'—')+'  |  Resp. '+resp.nom+'  |  Généré le '+now.toLocaleDateString('fr-FR'),PW/2,PH-7.5,{align:'center'});
