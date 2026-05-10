@@ -161,7 +161,7 @@ var S={
   step:1,
   info:{date:new Date().toISOString().slice(0,10),num:'',addr:'',client:'',tech:'',date_debut:'',date_fin:'',email_client:''},
   blocs:[],resp:'',photos:[],
-  sig:{url:'',name:''},
+  sig:{url:'',name:'',absent:false},
   m:{open:false,editId:null,niveau:'',obs:'',carottages:[],sciages:[],carbones:[],ouvertures:[],ouvsciages:[],autres:''}
 };
 var uid=1,sc,sx,drawing=false;
@@ -404,10 +404,20 @@ function step3(){
     +(S.photos.length<10?'<label class="photo-upload"><input type="file" accept="image/*" multiple onchange="addPhotos(this)"><div style="font-size:32px;margin-bottom:6px">📷</div><div style="font-size:13px;color:var(--mut);font-weight:600">Ajouter des photos</div></label>':'')
     +'</div>'
     +'<div class="card"><div class="ct">✍️ Signature client</div>'
-    +'<div class="f"><label>Nom du signataire</label><input type="text" id="f-signame" value="'+S.sig.name+'" placeholder="Prénom Nom"></div>'
-    +'<div class="f"><label>Signature</label><canvas id="sigc" width="800" height="300"></canvas>'
-    +'<button class="btn btn-o btn-sm" style="margin-top:8px" onclick="clearSig()">🗑 Effacer</button></div></div>'
-    +'<div class="info-box">📧 Le rapport PDF sera envoyé par email au client et au responsable sélectionné</div>';
+    +(S.sig.absent
+      ? '<div style="background:#fef3c7;border:2px dashed #F5C400;border-radius:10px;padding:18px;text-align:center;margin-bottom:4px">'
+        +'<div style="font-size:28px;margin-bottom:6px">🚧</div>'
+        +'<div style="font-size:15px;font-weight:800;color:#92400e;margin-bottom:4px">CLIENT ABSENT</div>'
+        +'<div style="font-size:13px;color:#78350f">Le rapport sera transmis sans signature client.<br>Une mention sera ajoutée sur le rapport PDF.</div>'
+        +'</div>'
+      : '<div class="f"><label>Nom du signataire</label><input type="text" id="f-signame" value="'+S.sig.name+'" placeholder="Prénom Nom"></div>'
+        +'<div class="f"><label>Signature</label><canvas id="sigc" width="800" height="300"></canvas>'
+        +'<button class="btn btn-o btn-sm" style="margin-top:8px" onclick="clearSig()">🗑 Effacer</button></div>'
+    )
+    +'<button onclick="toggleAbsent()" style="width:100%;margin-top:12px;padding:11px;border-radius:9px;border:2px solid '+(S.sig.absent?'#F5C400':'#e2e8f0')+';background:'+(S.sig.absent?'#1E2D35':'#f8fafc')+';color:'+(S.sig.absent?'#F5C400':'#64748b')+';font-size:13px;font-weight:700;cursor:pointer">'
+    +(S.sig.absent?'✅ Client absent — annuler':'⚠️ Client absent — pas de signature')+'</button>'
+    +'</div>'
+    +'<div class="info-box">📧 Le rapport PDF sera envoyé par email au responsable sélectionné'+(S.sig.absent?'':', ainsi qu\'au client')+'</div>';
 }
 
 function addPhotos(input){
@@ -738,6 +748,12 @@ function initSig(){
   cv.addEventListener('touchend',function(){drawing=false;if(sc)S.sig.url=sc.toDataURL();});
 }
 function clearSig(){if(sc&&sx){sx.clearRect(0,0,sc.width,sc.height);S.sig.url='';}}
+function toggleAbsent(){
+  var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;
+  if(sc&&!S.sig.absent)S.sig.url=sc.toDataURL();
+  S.sig.absent=!S.sig.absent;
+  R();
+}
 
 function events(){
   if(S.step===1){
@@ -748,7 +764,7 @@ function events(){
   if(S.step===3){
     var sn=document.getElementById('f-signame');if(sn)sn.addEventListener('input',function(e){S.sig.name=e.target.value;});
     var ec=document.getElementById('f-email-client');if(ec)ec.addEventListener('input',function(e){S.info.email_client=e.target.value.trim();});
-    setTimeout(initSig,50);
+    if(!S.sig.absent)setTimeout(initSig,50);
   }
 }
 function go(step){
@@ -771,10 +787,12 @@ async function generate(){
   var ecEl=document.getElementById('f-email-client');
   if(ecEl)S.info.email_client=ecEl.value.trim();
   if(!S.resp){alert('⚠️ Veuillez sélectionner le responsable du chantier.');return;}
-  if(!S.info.email_client){alert('⚠️ Veuillez renseigner l\'email du client.');return;}
-  var emailRegex=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if(!emailRegex.test(S.info.email_client)){alert('⚠️ L\'adresse email du client n\'est pas valide.');return;}
-  var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;if(sc)S.sig.url=sc.toDataURL();
+  if(!S.sig.absent){
+    if(!S.info.email_client){alert('⚠️ Veuillez renseigner l\'email du client.');return;}
+    var emailRegex=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if(!emailRegex.test(S.info.email_client)){alert('⚠️ L\'adresse email du client n\'est pas valide.');return;}
+  }
+  if(!S.sig.absent){var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;if(sc)S.sig.url=sc.toDataURL();}
   var btn=document.getElementById('btn-gen');if(btn){btn.textContent='⏳ Génération PDF...';btn.disabled=true;}
   try{
     var c=S.info,sig=S.sig,resp=EQUIPE.find(function(x){return x.id===S.resp;})||{nom:'—',email:''};
@@ -935,39 +953,52 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
   if(tOuv>0)rr.push(['Ouvertures carottages',blocs.filter(function(b){return (b.ouvertures||[]).length>0;}).length+' niveau(x)',tOuv+' ouverture(s)']);
   if(tOuvSci>0)rr.push(['Ouvertures sciage',blocs.filter(function(b){return (b.ouvsciages||[]).length>0;}).length+' niveau(x)',tOuvSci+' ouverture(s)']);
   if(rr.length){
-    var cx=[M,M+85,M+158];
-    var TH=9,tableW=PW-2*M,yTop=y;
-    // En-tête tableau (fond sombre)
-    doc.setFillColor(DRK[0],DRK[1],DRK[2]);
-    doc.rect(M,y,tableW,TH,'F');
-    doc.setFontSize(7);doc.setFont('helvetica','bold');
-    doc.setTextColor(YEL[0],YEL[1],YEL[2]);
-    ['PRESTATION','NIVEAUX CONCERNÉS','QUANTITÉ TOTALE'].forEach(function(h,i){doc.text(h,cx[i]+4,y+6);});
-    y+=TH;
-    // Lignes
+    var tableW=PW-2*M; // 182mm
+    var RH=11,yTop=y;
+    // Colonnes : prestation=70mm, niveaux=52mm, quantité=60mm (droite)
+    var xC1=M+6, xC2=M+76, xC3=M+tableW-4;
+    // ── En-tête sombre ──
+    doc.setFillColor(DRK[0],DRK[1],DRK[2]);doc.rect(M,y,tableW,RH,'F');
+    doc.setFontSize(6.5);doc.setFont('helvetica','bold');doc.setTextColor(YEL[0],YEL[1],YEL[2]);
+    doc.text('PRESTATION',xC1,y+7.5);
+    doc.text('NIVEAUX',xC2,y+7.5);
+    doc.text('QUANTITÉ',xC3,y+7.5,{align:'right'});
+    y+=RH;
+    // ── Lignes de données ──
     rr.forEach(function(row,ri){
-      if(y>PH-25){doc.addPage();y=15;}
-      var bg=ri%2===0?WHT:LGT;
-      doc.setFillColor(bg[0],bg[1],bg[2]);doc.rect(M,y,tableW,TH,'F');
-      doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,3,TH,'F');
-      row.forEach(function(cell,i){
-        doc.setFontSize(i===2?9.5:8.5);doc.setFont('helvetica',i===2?'bold':'normal');
-        var tc=i===2?DRK:GRY;doc.setTextColor(tc[0],tc[1],tc[2]);
-        doc.text(cell,cx[i]+6,y+6);
-      });
-      y+=TH;
+      if(y+RH>PH-22){doc.addPage();y=15;}
+      // Fond alterné
+      doc.setFillColor(ri%2===0?248:255,ri%2===0?250:255,ri%2===0?252:255);
+      doc.rect(M,y,tableW,RH,'F');
+      // Accent jaune gauche
+      doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,4,RH,'F');
+      // Séparateur horizontal léger
+      doc.setDrawColor(226,232,240);doc.setLineWidth(0.2);
+      doc.line(M,y,M+tableW,y);
+      // Prestation (colonne 1, bold, sombre)
+      doc.setFontSize(8.5);doc.setFont('helvetica','bold');
+      doc.setTextColor(DRK[0],DRK[1],DRK[2]);
+      doc.text(row[0],xC1,y+7.5);
+      // Niveaux (colonne 2, normal, gris)
+      doc.setFontSize(8);doc.setFont('helvetica','normal');
+      doc.setTextColor(GRY[0],GRY[1],GRY[2]);
+      doc.text(row[1],xC2,y+7.5);
+      // Quantité (colonne 3, bold, droite, sombre)
+      doc.setFontSize(9.5);doc.setFont('helvetica','bold');
+      doc.setTextColor(DRK[0],DRK[1],DRK[2]);
+      doc.text(row[2],xC3,y+7.5,{align:'right'});
+      y+=RH;
     });
-    // Barre jaune de fermeture
-    doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,tableW,2,'F');
-    y+=2;
-    // Bordure externe — 4 lignes explicites
-    doc.setDrawColor(140,160,175);doc.setLineWidth(0.7);
-    doc.line(M,yTop,M+tableW,yTop);       // haut
-    doc.line(M,y,M+tableW,y);             // bas
-    doc.line(M,yTop,M,y);                 // gauche
-    doc.line(M+tableW,yTop,M+tableW,y);   // droite
+    // ── Fermeture : barre jaune + 4 lignes de bordure ──
+    doc.setFillColor(YEL[0],YEL[1],YEL[2]);doc.rect(M,y,tableW,2.5,'F');
+    y+=2.5;
+    doc.setDrawColor(140,160,175);doc.setLineWidth(0.8);
+    doc.line(M,yTop,M+tableW,yTop);      // haut
+    doc.line(M,y,M+tableW,y);            // bas
+    doc.line(M,yTop,M,y);               // gauche
+    doc.line(M+tableW,yTop,M+tableW,y); // droite
     doc.setLineWidth(0.2);doc.setDrawColor(BRD[0],BRD[1],BRD[2]);
-    y+=7;
+    y+=8;
   }
 
   // Photos
@@ -991,28 +1022,47 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
 
   // ── SIGNATURE & VALIDATION ──
   if(y>PH-72){doc.addPage();y=15;}
-  secTitle('VALIDATION CLIENT — BON POUR ACCORD');
+  secTitle(sig.absent?'RAPPORT SANS SIGNATURE CLIENT':'VALIDATION CLIENT — BON POUR ACCORD');
   var sigW=(PW-2*M-5)/2;
-  // Bloc gauche : signature client
-  set(WHT,BRD);doc.roundedRect(M,y,sigW,62,1,1,'FD');
-  set(DRK);doc.roundedRect(M,y,sigW,11,1,1,'F');
-  doc.setFontSize(8);doc.setFont('helvetica','bold');set(null,null,WHT);
-  doc.text('SIGNATURE CLIENT',M+sigW/2,y+7.5,{align:'center'});
-  doc.setFontSize(9);doc.setFont('helvetica','bold');set(null,null,DRK);
-  doc.text(sig.name||'—',M+sigW/2,y+20,{align:'center'});
-  doc.setFontSize(7);doc.setFont('helvetica','normal');set(null,null,GRY);
-  doc.text('Lu et approuvé — Bon pour accord',M+sigW/2,y+26,{align:'center'});
-  if(sig.url){
-    try{doc.addImage(sig.url,'PNG',M+sigW/2-20,y+29,40,20);}catch(e){}
+  // Bloc gauche : signature client OU mention absent
+  if(sig.absent){
+    // Bloc "CLIENT ABSENT"
+    set(WHT,BRD);doc.roundedRect(M,y,sigW,62,1,1,'FD');
+    // En-tête orange/ambre
+    doc.setFillColor(245,158,11);doc.roundedRect(M,y,sigW,11,1,1,'F');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(255,255,255);
+    doc.text('CLIENT ABSENT',M+sigW/2,y+7.5,{align:'center'});
+    // Icône et texte
+    doc.setFontSize(22);doc.setTextColor(245,158,11);
+    doc.text('!',M+sigW/2,y+28,{align:'center'});
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(DRK[0],DRK[1],DRK[2]);
+    doc.text('Signature impossible',M+sigW/2,y+38,{align:'center'});
+    doc.setFontSize(7);doc.setFont('helvetica','normal');doc.setTextColor(GRY[0],GRY[1],GRY[2]);
+    var absLines=['Le client était absent lors de','l\'intervention. Ce rapport est','transmis sans signature client.'];
+    absLines.forEach(function(l,i){doc.text(l,M+sigW/2,y+46+i*5,{align:'center'});});
+    doc.text('Date : '+fd(c.date),M+sigW/2,y+62-4,{align:'center'});
   }else{
-    set(null,BRD);doc.setLineDashPattern([1.5,1.5],0);
-    doc.rect(M+8,y+29,sigW-16,20,'S');
-    doc.setLineDashPattern([],0);
-    doc.setFontSize(7);set(null,null,[200,210,215]);
-    doc.text('Signature',M+sigW/2,y+41,{align:'center'});
+    // Bloc normal
+    set(WHT,BRD);doc.roundedRect(M,y,sigW,62,1,1,'FD');
+    set(DRK);doc.roundedRect(M,y,sigW,11,1,1,'F');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');set(null,null,WHT);
+    doc.text('SIGNATURE CLIENT',M+sigW/2,y+7.5,{align:'center'});
+    doc.setFontSize(9);doc.setFont('helvetica','bold');set(null,null,DRK);
+    doc.text(sig.name||'—',M+sigW/2,y+20,{align:'center'});
+    doc.setFontSize(7);doc.setFont('helvetica','normal');set(null,null,GRY);
+    doc.text('Lu et approuvé — Bon pour accord',M+sigW/2,y+26,{align:'center'});
+    if(sig.url){
+      try{doc.addImage(sig.url,'PNG',M+sigW/2-20,y+29,40,20);}catch(e){}
+    }else{
+      set(null,BRD);doc.setLineDashPattern([1.5,1.5],0);
+      doc.rect(M+8,y+29,sigW-16,20,'S');
+      doc.setLineDashPattern([],0);
+      doc.setFontSize(7);set(null,null,[200,210,215]);
+      doc.text('Signature',M+sigW/2,y+41,{align:'center'});
+    }
+    doc.setFontSize(8);doc.setFont('helvetica','normal');set(null,null,GRY);
+    doc.text('Date : '+fd(c.date),M+sigW/2,y+56,{align:'center'});
   }
-  doc.setFontSize(8);doc.setFont('helvetica','normal');set(null,null,GRY);
-  doc.text('Date : '+fd(c.date),M+sigW/2,y+56,{align:'center'});
   // Bloc droit : bon pour accord
   var rx=M+sigW+5;
   set(WHT,BRD);doc.roundedRect(rx,y,sigW,62,1,1,'FD');
@@ -1091,10 +1141,13 @@ async function envoyerParEmail(blob,filename,c,resp){
     reader.readAsDataURL(blob);
   });
 
+  var clientAbsent=S.sig&&S.sig.absent;
+  var emailTo=(!clientAbsent&&emailClient)?emailClient:emailResp;
+  var emailCc=(!clientAbsent&&emailClient)?emailResp:'';
   var payload={
     // Destinataires
-    to:emailClient,
-    cc:emailResp,
+    to:emailTo,
+    cc:emailCc,
     // Contenu email
     subject:subject,
     body:corps,
