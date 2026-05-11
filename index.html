@@ -1148,7 +1148,7 @@ async function envoyerParEmail(blob,filename,c,resp){
   var corps="Bonjour,\n\nVeuillez trouver ci-joint le rapport de chantier CHOK BETON.\n\n"
     +"Chantier : "+(c.addr||'-')+"\n"
     +"Date : "+fd(c.date)+"\n"
-    +"N de rapport : "+(c.num||'-')+"\n"
+    +"N de rapport : "+(c.numComplet||c.num||'-')+"\n"
     +"Technicien : "+(c.tech||'-')+"\n"
     +(c.client?"Client : "+c.client+"\n":"")+"\n"
     +"Cordialement,\nL'equipe CHOK BETON\n"
@@ -1184,7 +1184,7 @@ async function envoyerParEmail(blob,filename,c,resp){
     filename:filename,
     pdf:base64,
     // Données pour archivage (Drive + Sheets)
-    num:c.num||'—',
+    num:c.numComplet||c.num||'—',
     addr:c.addr||'—',
     client:c.client||'—',
     tech:c.tech||'—',
