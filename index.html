@@ -159,7 +159,7 @@ function newOuvSciCar(){return {diam:150,nb:1,ep:'',diamCustom:''};}
 // ── STATE ──
 var S={
   step:1,
-  info:{date:new Date().toISOString().slice(0,10),num:'',addr:'',client:'',tech:'',date_debut:'',date_fin:'',email_client:''},
+  info:{date:new Date().toISOString().slice(0,10),num:'',visite:'',addr:'',client:'',tech:'',date_debut:'',date_fin:'',email_client:''},
   blocs:[],resp:'',photos:[],
   sig:{url:'',name:'',absent:false},
   m:{open:false,editId:null,niveau:'',obs:'',carottages:[],sciages:[],carbones:[],ouvertures:[],ouvsciages:[],autres:''}
@@ -308,7 +308,13 @@ function step1(){
   var c=S.info;
   return '<div class="card"><div class="ct">📅 Informations générales</div>'
     +'<div class="f"><label>Date du rapport</label><input type="date" id="f-date" value="'+c.date+'"></div>'
-    +'<div class="f"><label>N° de rapport</label><input type="text" id="f-num" value="'+c.num+'" placeholder="Ex : 2025-001"></div>'
+    +'<div class="f"><label>N° de chantier <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--mut)">— 1er constat : cliquer Auto / Suivants : réutiliser le même N°</span></label>'
+    +'<div style="display:flex;gap:8px">'
+    +'<input type="text" id="f-num" value="'+c.num+'" placeholder="Ex : 2026-0001" style="flex:1">'
+    +'<button id="btn-num" onclick="getNumAuto()" style="padding:0 14px;background:var(--dk);color:var(--y);border:none;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0">🔢 Auto</button>'
+    +'</div></div>'
+    +'<div class="f"><label>N° de visite <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--mut)">— optionnel (ex : 1, 2, 3... si chantier multi-semaines)</span></label>'
+    +'<input type="number" id="f-visite" min="1" value="'+(c.visite||'')+'" placeholder="1"></div>'
     +'<div class="row"><div class="f"><label>Début chantier</label><input type="date" id="f-date-debut" value="'+c.date_debut+'"></div>'
     +'<div class="f"><label>Fin chantier</label><input type="date" id="f-date-fin" value="'+c.date_fin+'"></div></div>'
     +'</div><div class="card"><div class="ct">📍 Chantier</div>'
@@ -748,6 +754,26 @@ function initSig(){
   cv.addEventListener('touchend',function(){drawing=false;if(sc)S.sig.url=sc.toDataURL();});
 }
 function clearSig(){if(sc&&sx){sx.clearRect(0,0,sc.width,sc.height);S.sig.url='';}}
+async function getNumAuto(){
+  var btn=document.getElementById('btn-num');
+  if(btn){btn.textContent='⏳';btn.disabled=true;}
+  try{
+    var res=await fetch(APPS_SCRIPT_URL+'?action=nextNum');
+    var data=await res.json();
+    if(data.ok){
+      S.info.num=data.num;
+      var el=document.getElementById('f-num');
+      if(el)el.value=data.num;
+    }else{
+      alert('Erreur lors de la génération : '+(data.error||'inconnue'));
+    }
+  }catch(e){
+    alert('⚠️ Impossible de générer le numéro.\nVérifiez votre connexion internet.');
+  }finally{
+    if(btn){btn.textContent='🔢 Auto';btn.disabled=false;}
+  }
+}
+
 function toggleAbsent(){
   var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;
   if(sc&&!S.sig.absent)S.sig.url=sc.toDataURL();
@@ -757,7 +783,7 @@ function toggleAbsent(){
 
 function events(){
   if(S.step===1){
-    [['date','date'],['num','num'],['addr','addr'],['client','client'],['tech','tech'],['date-debut','date_debut'],['date-fin','date_fin']].forEach(function(pair){
+    [['date','date'],['num','num'],['visite','visite'],['addr','addr'],['client','client'],['tech','tech'],['date-debut','date_debut'],['date-fin','date_fin']].forEach(function(pair){
       var el=document.getElementById('f-'+pair[0]);if(el)el.addEventListener('input',function(ev){S.info[pair[1]]=ev.target.value;});
     });
   }
@@ -796,10 +822,14 @@ async function generate(){
   var btn=document.getElementById('btn-gen');if(btn){btn.textContent='⏳ Génération PDF...';btn.disabled=true;}
   try{
     var c=S.info,sig=S.sig,resp=EQUIPE.find(function(x){return x.id===S.resp;})||{nom:'—',email:''};
-    var filename='rapport-chokbeton-'+(c.date||'chantier')+'-'+(c.num||'001').replace(/[^a-zA-Z0-9]/g,'_')+'.pdf';
-    saveToHistory(filename,c,resp,S.blocs,sig,S.photos);
-    var blob=await buildPDFFromData(c,S.blocs,sig,S.photos,resp,filename);
-    await envoyerParEmail(blob,filename,c,resp);
+    // Numéro complet : base + suffixe visite si > 1
+    var numBase=c.num||'001';
+    var numComplet=numBase+(c.visite&&parseInt(c.visite)>1?' / V'+parseInt(c.visite):'');
+    var cAvecNum=Object.assign({},c,{numComplet:numComplet});
+    var filename='rapport-chokbeton-'+(c.date||'chantier')+'-'+numBase.replace(/[^a-zA-Z0-9]/g,'_')+(c.visite&&parseInt(c.visite)>1?'_V'+parseInt(c.visite):'')+'.pdf';
+    saveToHistory(filename,cAvecNum,resp,S.blocs,sig,S.photos);
+    var blob=await buildPDFFromData(cAvecNum,S.blocs,sig,S.photos,resp,filename);
+    await envoyerParEmail(blob,filename,cAvecNum,resp);
   }catch(e){alert('Erreur : '+e.message);}
   finally{if(btn){btn.textContent='📧 Générer & Envoyer par email';btn.disabled=false;}}
 }
@@ -832,7 +862,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
   // N° rapport
   set(null,null,WHT);
   doc.setFontSize(9.5);doc.setFont('helvetica','bold');
-  doc.text('N  '+String(c.num||'—'),PW-10,36,{align:'right'});
+  doc.text('N  '+String(c.numComplet||c.num||'—'),PW-10,36,{align:'right'});
   set(null,null,[190,205,212]);
   doc.setFontSize(7);doc.setFont('helvetica','normal');doc.text(fd(c.date),PW-10,42,{align:'right'});
   y=54;
@@ -1098,7 +1128,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
     doc.text('1 Rue Hector Berlioz  |  95210 SAINT GRATIEN',M+2,PH-3);
     // Numéro de rapport + responsable centré
     doc.setFontSize(6.5);set(null,null,[180,195,200]);
-    doc.text('N '+String(c.num||'—')+'  |  Resp. '+resp.nom+'  |  Généré le '+now.toLocaleDateString('fr-FR'),PW/2,PH-7.5,{align:'center'});
+    doc.text('N '+String(c.numComplet||c.num||'—')+'  |  Resp. '+resp.nom+'  |  Généré le '+now.toLocaleDateString('fr-FR'),PW/2,PH-7.5,{align:'center'});
     // Pagination à droite en jaune
     doc.setFontSize(8);doc.setFont('helvetica','bold');set(null,null,YEL);
     doc.text('Page '+p+'/'+total,PW-M,PH-7.5,{align:'right'});
