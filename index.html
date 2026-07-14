@@ -4,6 +4,8 @@
 <title>CHOK'BETON — Rapport Chantier</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#1E2D35">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -125,6 +127,51 @@ textarea{resize:vertical;min-height:70px}
 // ── URL Google Apps Script (à renseigner après déploiement) ──
 // Suivez le fichier apps-script.gs fourni avec cette application
 var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxZZpTk0huPOlvI6sbHC6dkBmXEVMUugNGZkzwGVI4GsrRrkIdMW8SpbBJDGKJNukiH-A/exec';
+// Doit être IDENTIQUE à APP_TOKEN dans apps-script.gs (sinon : "Acces refuse").
+// Empêche un tiers d'utiliser l'URL Apps Script pour envoyer des emails.
+var APP_TOKEN = 'CB-XF9UY-NBYHC-ALAGR-L7AIP';
+
+// Photos : côté long max (px) et qualité JPEG — garde le PDF sous ~3 Mo, envoyable en 4G
+var PHOTO_MAX=1400;
+var PHOTO_Q=0.7;
+/* ── LES CHEFS D'ÉQUIPE ─────────────────────────────────────────────────
+   ⚠️ NE PAS MODIFIER CETTE LISTE POUR AJOUTER/SUPPRIMER QUELQU'UN.
+   Elle ne sert que de secours au tout premier lancement (avant la première
+   connexion au serveur). La vraie liste vit dans Google Sheets :
+      Classeur "CHOKBETON - Registre" → onglet "Personnel"
+   Une ligne = un chef d'équipe. Ajouter ou supprimer une ligne suffit :
+   les téléphones se mettent à jour tout seuls à l'ouverture de l'appli.
+   ────────────────────────────────────────────────────────────────────── */
+var CHEFS_DEFAUT=[
+  'ADOU Stéphane','AKOVI Yaovi','BAKAYOKO Moussa','BAVESA Mayala',
+  'CAMARA Mady Oualy','CISSE Souleymane','COLPIN Maxence','COULIBALY Koniba',
+  'ELVIS','GARABA','GARCIA Gomes','HAMARA','JUNIOR','LEROY David',
+  'LOURENCO Nelson','MABELA Didier','MAKALOU Ibrahim','MALUNGILA Jhonny',
+  'MAMBI Roger','MARCOS De Jesus','MBIDI André','MENDES Evileno',
+  'MPAKA Mayela','NDOBE Ernest','OMAR','PANEL Bertrand','SENCIER Laurent',
+  'SISSOKO Fily','SOUKOUNA Mahamadou','YATABARI Ibrahima','ZAN'
+];
+// Liste réellement affichée : celle du serveur si on l'a déjà reçue, sinon la liste de secours.
+function chefsListe(){
+  try{
+    var c=JSON.parse(localStorage.getItem('cb_chefs')||'null');
+    if(c&&c.length)return c;
+  }catch(e){}
+  return CHEFS_DEFAUT;
+}
+// Récupère la liste à jour depuis l'onglet "Personnel" (silencieux : hors ligne, on garde le cache)
+async function chargerChefs(){
+  if(!navigator.onLine)return;
+  try{
+    var res=await fetch(APPS_SCRIPT_URL+'?action=chefs&token='+encodeURIComponent(APP_TOKEN));
+    var d=await res.json();
+    if(d&&d.ok&&d.chefs&&d.chefs.length){
+      var avant=JSON.stringify(chefsListe());
+      localStorage.setItem('cb_chefs',JSON.stringify(d.chefs));
+      if(S.step===1&&avant!==JSON.stringify(d.chefs))R(); // la liste a changé → on rafraîchit l'écran
+    }
+  }catch(e){/* pas de réseau : on garde la liste en cache */}
+}
 
 var EQUIPE=[
   {id:'christopher',nom:'Christopher',email:'christopher@chok-beton.fr'},
@@ -161,14 +208,18 @@ var S={
   step:1,
   info:{date:new Date().toISOString().slice(0,10),num:'',visite:'',addr:'',client:'',tech:'',date_debut:'',date_fin:'',email_client:''},
   blocs:[],resp:'',photos:[],
-  sig:{url:'',name:'',absent:false},
+  sig:{url:'',name:'',absent:false,at:''},          // at = horodatage de la signature
+  reserves:{has:false,texte:''},                    // réserves émises par le client
+  envoi:'email',                                    // 'email' ou 'whatsapp'
   m:{open:false,editId:null,niveau:'',obs:'',carottages:[],sciages:[],carbones:[],ouvertures:[],ouvsciages:[],autres:''}
 };
 var uid=1,sc,sx,drawing=false;
+var lastPDF=null; // dernier PDF généré (pour le partage WhatsApp)
+S.techAutre=false; // chef d'équipe saisi à la main (nom hors liste)
 
 // ── PERSISTENCE ──
 function saveState(){
-  try{localStorage.setItem('cb_rapport',JSON.stringify({info:S.info,blocs:S.blocs,resp:S.resp,sig:{name:S.sig.name},step:S.step}));}catch(e){}
+  try{localStorage.setItem('cb_rapport',JSON.stringify({info:S.info,blocs:S.blocs,resp:S.resp,sig:{name:S.sig.name},reserves:S.reserves,envoi:S.envoi,step:S.step}));}catch(e){}
 }
 function loadState(){
   try{
@@ -178,9 +229,87 @@ function loadState(){
     if(p.blocs)S.blocs=p.blocs;
     if(p.resp)S.resp=p.resp;
     if(p.sig&&p.sig.name)S.sig.name=p.sig.name;
+    if(p.reserves)S.reserves=p.reserves;
+    if(p.envoi)S.envoi=p.envoi;
     if(p.step)S.step=p.step;
     var mx=S.blocs.reduce(function(a,b){return Math.max(a,parseInt(b.id)||0);},0);uid=mx+1;
   }catch(e){}
+  // Le chef d'équipe est mémorisé sur le téléphone : saisi une fois, pré-rempli ensuite
+  if(!S.info.tech){try{S.info.tech=localStorage.getItem('cb_tech')||'';}catch(e){}}
+}
+function memoTech(nom){try{if(nom&&nom.trim())localStorage.setItem('cb_tech',nom.trim());}catch(e){}}
+
+/* ── MÉTRÉS ────────────────────────────────────────────────────────────
+   Une seule source de vérité pour les quantités : écran, PDF et registre
+   Sheets lisent tous ce calcul. Unités : ep/prof en cm, ml et m en mètres.
+   ──────────────────────────────────────────────────────────────────── */
+function metres(blocs){
+  var t={niveaux:(blocs||[]).length,
+    nbCar:0, mlCar:0,        // carottages : nombre + ml forés (nb × épaisseur)
+    mlSci:0, m2Sci:0,        // sciage : ml sciés + m² de coupe (ml × profondeur)
+    nbCb:0,  mlCb:0,         // lamelles carbone : nombre + ml posés
+    nbOuvCar:0, m2OuvCar:0,  // ouvertures par carottage : nombre + m²
+    nbOuvSci:0, m2OuvSci:0}; // ouvertures par sciage : nombre + m²
+  var n=function(v){var x=parseFloat(v);return isNaN(x)?0:x;};
+  (blocs||[]).forEach(function(b){
+    (b.carottages||[]).forEach(function(l){
+      t.nbCar+=n(l.nb); t.mlCar+=n(l.nb)*n(l.ep)/100;
+    });
+    (b.sciages||[]).forEach(function(l){
+      t.mlSci+=n(l.ml); t.m2Sci+=n(l.ml)*n(l.prof)/100;
+    });
+    (b.carbones||[]).forEach(function(l){
+      t.nbCb+=n(l.nbl); t.mlCb+=n(l.nbl)*n(l.ll);
+    });
+    (b.ouvertures||[]).forEach(function(o){
+      t.nbOuvCar++; t.m2OuvCar+=n(o.larg)*n(o.long);
+      (o.carottages||[]).forEach(function(l){t.nbCar+=n(l.nb);t.mlCar+=n(l.nb)*n(l.ep)/100;});
+    });
+    (b.ouvsciages||[]).forEach(function(o){
+      t.nbOuvSci++; t.m2OuvSci+=n(o.haut)*n(o.larg);
+      (o.coupes||[]).forEach(function(cp){t.mlSci+=n(cp.nb)*n(cp.ml);t.m2Sci+=n(cp.nb)*n(cp.ml)*n(cp.ep)/100;});
+      (o.carottages||[]).forEach(function(l){t.nbCar+=n(l.nb);t.mlCar+=n(l.nb)*n(l.ep)/100;});
+    });
+  });
+  ['mlCar','mlSci','m2Sci','mlCb','m2OuvCar','m2OuvSci'].forEach(function(k){
+    t[k]=Math.round(t[k]*100)/100;
+  });
+  return t;
+}
+// Lignes du récapitulatif, réutilisées par l'écran, le PDF et l'email
+function metresLignes(t){
+  var r=[];
+  if(t.nbCar>0)   r.push(['Carottage',            t.nbCar+' carottage(s)', t.mlCar>0?t.mlCar+' ml forés':'']);
+  if(t.mlSci>0)   r.push(['Sciage',               t.mlSci+' ml',           t.m2Sci>0?t.m2Sci+' m² de coupe':'']);
+  if(t.nbCb>0)    r.push(['Lamelles carbone',     t.nbCb+' lamelle(s)',    t.mlCb>0?t.mlCb+' ml posés':'']);
+  if(t.nbOuvCar>0)r.push(['Ouvertures carottage', t.nbOuvCar+' ouverture(s)', t.m2OuvCar>0?t.m2OuvCar+' m²':'']);
+  if(t.nbOuvSci>0)r.push(['Ouvertures sciage',    t.nbOuvSci+' ouverture(s)', t.m2OuvSci>0?t.m2OuvSci+' m²':'']);
+  return r;
+}
+
+/* ── GÉOLOCALISATION DES PHOTOS ────────────────────────────────────────
+   Position capturée au moment de l'ajout des photos et imprimée sous
+   chaque cliché (preuve : le bon chantier, le bon jour). Silencieux si
+   le chef refuse la permission ou si le GPS ne capte pas (sous-sol).
+   ──────────────────────────────────────────────────────────────────── */
+var geoCache=null;
+function getGeo(){
+  return new Promise(function(resolve){
+    if(!navigator.geolocation)return resolve(null);
+    if(geoCache&&Date.now()-geoCache.at<300000)return resolve(geoCache); // < 5 min : on réutilise
+    navigator.geolocation.getCurrentPosition(
+      function(p){geoCache={lat:p.coords.latitude,lng:p.coords.longitude,at:Date.now()};resolve(geoCache);},
+      function(){resolve(null);},
+      {enableHighAccuracy:false,timeout:8000,maximumAge:300000}
+    );
+  });
+}
+function geoTxt(p){
+  if(!p||!p.at)return '';
+  var d=new Date(p.at);
+  var s=('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2)+' '+('0'+d.getHours()).slice(-2)+'h'+('0'+d.getMinutes()).slice(-2);
+  if(p.lat&&p.lng)s+='  ·  '+p.lat.toFixed(5)+', '+p.lng.toFixed(5);
+  return s;
 }
 function resetState(){
   if(!confirm('Démarrer un nouveau rapport ?\nLe rapport actuel sera effacé.'))return;
@@ -232,11 +361,44 @@ function showHistory(){
       +'<div style="font-size:12px;color:var(--mut);margin-top:2px">'+fd(r.date)+' · '+r.client+' · '+r.resp+'</div>'
       +'<div style="font-size:11px;color:var(--mut);margin-top:1px">'+r.niveaux+' niveau(x) · '+r.tech+'</div>'
       +'</div><button onclick="deleteHistEntry('+r.id+')" style="background:none;border:none;color:#ef4444;font-size:18px;cursor:pointer;flex-shrink:0;padding:2px">🗑</button></div>'
-      +'<div style="display:flex;gap:8px;margin-top:9px">'
-      +'<button onclick="regenPDF('+r.id+')" style="flex:1;padding:8px;background:var(--dk);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">📄 Régénérer PDF</button>'
-      +'<button onclick="restoreReport('+r.id+')" style="flex:1;padding:8px;background:var(--y);color:var(--dk);border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">✏️ Modifier</button>'
+      +'<div style="display:flex;gap:6px;margin-top:9px">'
+      +'<button onclick="nouvelleVisite('+r.id+')" style="flex:1;padding:8px;background:#16a34a;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer">➕ Nouvelle visite</button>'
+      +'<button onclick="restoreReport('+r.id+')" style="flex:1;padding:8px;background:var(--y);color:var(--dk);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer">✏️ Modifier</button>'
+      +'<button onclick="regenPDF('+r.id+')" style="flex:1;padding:8px;background:var(--dk);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer">📄 Renvoyer</button>'
       +'</div></div>';
     }).join('');
+}
+/* ── NOUVELLE VISITE ───────────────────────────────────────────────────
+   Chantier multi-semaines : on repart du rapport précédent (n°, adresse,
+   client, email, chef d'équipe) et on incrémente le n° de visite.
+   Les travaux, photos et la signature sont remis à zéro : c'est une
+   nouvelle intervention, pas une copie.
+   ──────────────────────────────────────────────────────────────────── */
+function nouvelleVisite(id){
+  var r=loadHistory().find(function(x){return x.id===id;});
+  if(!r||!r.fullData){alert('Données introuvables.');return;}
+  var src=r.fullData.info||{};
+  var vis=parseInt(src.visite||1)||1;
+  var suivante=vis+1;
+  if(!confirm('Nouvelle visite sur le chantier :\n'+(src.addr||'—')+'\n\nN° '+(src.num||'—')+' — visite V'+suivante
+    +'\n\nLes informations du chantier sont reprises.\nLes travaux, photos et signature repartent à zéro.'))return;
+  S.info={
+    date:new Date().toISOString().slice(0,10),
+    num:src.num||'',            // même n° de chantier
+    visite:String(suivante),    // visite incrémentée
+    addr:src.addr||'',
+    client:src.client||'',
+    tech:src.tech||'',
+    date_debut:src.date_debut||'',
+    date_fin:'',
+    email_client:src.email_client||''
+  };
+  S.blocs=[];S.photos=[];S.resp='';
+  S.sig={url:'',name:'',absent:false,at:''};
+  S.reserves={has:false,texte:''};
+  S.step=2;histOpen=false;uid=1;
+  saveState();R();showHistory();
+  alert('✅ Visite V'+suivante+' préparée.\nSaisissez les travaux de cette semaine.');
 }
 function restoreReport(id){
   if(!confirm('Charger ce rapport ?\nLe rapport en cours sera remplacé.'))return;
@@ -244,8 +406,9 @@ function restoreReport(id){
   if(!r||!r.fullData){alert('Données introuvables.');return;}
   Object.assign(S.info,r.fullData.info);
   S.blocs=JSON.parse(JSON.stringify(r.fullData.blocs));
-  S.sig={name:r.fullData.sig.name,url:r.fullData.sig.url||''};
+  S.sig={name:r.fullData.sig.name,url:r.fullData.sig.url||'',absent:false,at:r.fullData.sig.at||''};
   S.photos=JSON.parse(JSON.stringify(r.fullData.photos||[]));
+  S.reserves=(r.fullData.info&&r.fullData.info.reserves)?JSON.parse(JSON.stringify(r.fullData.info.reserves)):{has:false,texte:''};
   S.resp='';S.step=1;histOpen=false;saveState();R();
   alert('Rapport chargé !');
 }
@@ -282,10 +445,10 @@ function togGrn(on,fn,label){return togBtn(on,fn,label,'#16a34a','#f0fdf4','#166
 function togBlu(on,fn,label){return togBtn(on,fn,label,'#0284c7','#e0f2fe','#0369a1');}
 
 // ── RENDER ──
-function R(){document.getElementById('app').innerHTML=hdr()+content()+bot();events();saveState();}
+function R(){document.getElementById('app').innerHTML=hdr()+content()+bot();events();saveState();renderQueue();}
 
 function hdr(){
-  var labs=['','Infos Chantier','Travaux par niveau','Photos & Signature'];
+  var labs=['','Infos Chantier','Travaux par niveau','Photos & Signature','Vérification avant envoi'];
   return '<div class="hdr"><div class="hdr-row">'
     +'<div style="height:38px;display:flex;align-items:center">'+LOGO(38)+'</div>'
     +'<div class="hdr-info"><div style="display:flex;align-items:center;justify-content:space-between">'
@@ -294,14 +457,15 @@ function hdr(){
     +'<button onclick="toggleHistory()" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:7px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">📋</button>'
     +'<button onclick="resetState()" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:7px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">✚ Nouveau</button>'
     +'</div></div>'
-    +'<div class="hdr-step">'+labs[S.step]+' — Étape '+S.step+'/3</div></div>'
+    +'<div class="hdr-step">'+labs[S.step]+' — Étape '+S.step+'/4</div></div>'
     +'</div><div class="steps-bar">'
-    +[1,2,3].map(function(i){return '<div class="sd '+(i<S.step?'was':'')+(i===S.step?' on':'')+'"></div>';}).join('')
+    +[1,2,3,4].map(function(i){return '<div class="sd '+(i<S.step?'was':'')+(i===S.step?' on':'')+'"></div>';}).join('')
     +'</div></div>'
+    +'<div id="qbar"></div>'
     +'<div class="hist-panel" id="hist-panel"></div>';
 }
 
-function content(){return '<div class="body">'+(S.step===1?step1():S.step===2?step2():step3())+'</div>';}
+function content(){return '<div class="body">'+(S.step===1?step1():S.step===2?step2():S.step===3?step3():step4())+'</div>';}
 
 // ── ÉTAPE 1 ──
 function step1(){
@@ -320,8 +484,28 @@ function step1(){
     +'</div><div class="card"><div class="ct">📍 Chantier</div>'
     +'<div class="f"><label>Adresse / Nom du chantier</label><input type="text" id="f-addr" value="'+c.addr+'" placeholder="12 rue de la Paix, Paris"></div>'
     +'<div class="f"><label>Client</label><input type="text" id="f-client" value="'+c.client+'" placeholder="Nom du client"></div>'
-    +'</div><div class="card"><div class="ct">👷 Intervenant</div>'
-    +'<div class="f"><label>Nom du technicien</label><input type="text" id="f-tech" value="'+c.tech+'" placeholder="Prénom Nom"></div></div>';
+    +'</div><div class="card"><div class="ct">👷 Chef d\'équipe</div>'
+    +techField(c)
+    +'</div>';
+}
+/* Champ chef d'équipe : menu déroulant alimenté par l'onglet "Personnel".
+   Option « Autre » de secours : un intérimaire ou un nouvel embauché pas encore
+   dans la liste ne doit jamais bloquer un rapport sur le chantier. */
+function techField(c){
+  var liste=chefsListe();
+  var horsListe=!!(c.tech&&liste.indexOf(c.tech)===-1);
+  var autre=S.techAutre||horsListe;
+  return '<div class="f"><label>Chef d\'équipe <span style="color:#ef4444">*</span></label>'
+    +'<select id="f-tech" style="width:100%;padding:12px;font-size:15px;font-weight:600;border-radius:9px;border:1.5px solid var(--brd);background:#fff">'
+    +'<option value="">— Sélectionner —</option>'
+    +liste.map(function(n){return '<option value="'+n+'"'+(!autre&&c.tech===n?' selected':'')+'>'+n+'</option>';}).join('')
+    +'<option value="__autre__"'+(autre?' selected':'')+'>➕ Autre (nom non listé)</option>'
+    +'</select>'
+    +(autre
+      ? '<input type="text" id="f-tech-libre" value="'+(c.tech||'')+'" placeholder="Prénom Nom" style="margin-top:8px">'
+        +'<div style="font-size:11px;color:#92400e;margin-top:5px">⚠️ Nom hors liste. Signalez-le à la direction pour qu\'il soit ajouté au personnel.</div>'
+      : '<div style="font-size:11px;color:var(--mut);margin-top:5px">Mémorisé sur ce téléphone : pré-rempli aux prochains rapports.</div>')
+    +'</div>';
 }
 
 // ── ÉTAPE 2 ──
@@ -379,35 +563,66 @@ function blocHtml(b){
 }
 
 // ── ÉTAPE 3 ──
+function envoiBtn(mode,ico,titre,sous){
+  var on=S.envoi===mode;
+  return '<div onclick="selEnvoi(\''+mode+'\')" style="flex:1;cursor:pointer;border:2px solid '+(on?'var(--y)':'var(--brd)')+';background:'+(on?'#fffbeb':'#fff')
+    +';border-radius:10px;padding:12px 10px;text-align:center">'
+    +'<div style="font-size:22px;line-height:1">'+ico+'</div>'
+    +'<div style="font-size:13px;font-weight:800;color:var(--dk);margin-top:4px">'+titre+'</div>'
+    +'<div style="font-size:10px;color:var(--mut);margin-top:2px;line-height:1.3">'+sous+'</div>'
+    +(on?'<div style="font-size:11px;font-weight:800;color:#92400e;margin-top:5px">✅ Choisi</div>':'')
+    +'</div>';
+}
 function step3(){
-  var blocs=S.blocs,tCar=0,tSci=0,tCb=0,tOuv=0,tOuvSci=0;
-  blocs.forEach(function(b){
-    (b.carottages||[]).forEach(function(l){tCar+=parseInt(l.nb||0);});
-    (b.sciages||[]).forEach(function(l){tSci+=parseFloat(l.ml||0);});
-    (b.carbones||[]).forEach(function(l){tCb+=parseInt(l.nbl||0);});
-    tOuv+=(b.ouvertures||[]).length;
-    tOuvSci+=(b.ouvsciages||[]).length;
-  });
-  var rows=[];
-  if(tCar>0)rows.push('🔩 Carottage — '+tCar+' carottage(s)');
-  if(tSci>0)rows.push('🪚 Sciage — '+tSci+' ml');
-  if(tCb>0)rows.push('🏗️ '+tCb+' lamelle(s) carbone');
-  if(tOuv>0)rows.push('🔲 '+tOuv+' ouverture(s) par carottages');
-  if(tOuvSci>0)rows.push('🔳 '+tOuvSci+' ouverture(s) par sciage');
-  var recap=rows.length?'<p style="font-size:13px;color:var(--mut);margin-bottom:9px">'+blocs.length+' niveau(x)</p>'+rows.map(function(r){return '<div style="font-size:14px;padding:7px 0;border-bottom:1px solid var(--brd)">'+r+'</div>';}).join(''):'<p style="font-size:14px;color:var(--mut)">Aucune prestation</p>';
+  var t=metres(S.blocs);
+  var lignes=metresLignes(t);
+  var recap=lignes.length
+    ? '<p style="font-size:13px;color:var(--mut);margin-bottom:9px">'+t.niveaux+' niveau(x)</p>'
+      +lignes.map(function(r){return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:14px;padding:7px 0;border-bottom:1px solid var(--brd)">'
+        +'<span style="font-weight:700;color:var(--dk)">'+r[0]+'</span>'
+        +'<span style="text-align:right"><b>'+r[1]+'</b>'+(r[2]?'<br><span style="font-size:11px;color:var(--mut)">'+r[2]+'</span>':'')+'</span></div>';}).join('')
+    : '<p style="font-size:14px;color:var(--mut)">Aucune prestation</p>';
   var respCards=EQUIPE.map(function(e){return '<div class="rc '+(S.resp===e.id?'sel':'')+'" onclick="selResp(\''+e.id+'\')">'
     +'<div class="rc-av">'+e.nom[0]+'</div>'
     +'<div class="rc-info"><div class="rc-name">'+e.nom+'</div><div class="rc-sub" style="color:#0284c7">📧 '+e.email+'</div></div>'
     +(S.resp===e.id?'<span style="font-size:20px">✅</span>':'')+'</div>';}).join('');
-  var photoGrid=S.photos.length?'<div class="photo-grid">'+S.photos.map(function(p,i){return '<div class="photo-item"><img src="'+p.url+'"><button class="ph-del" onclick="delPhoto('+i+')">✕</button><div class="ph-cap"><input type="text" value="'+(p.caption||'')+'" placeholder="Légende..." oninput="S.photos['+i+'].caption=this.value"></div></div>';}).join('')+'</div><p style="font-size:12px;color:var(--mut);margin-top:6px;text-align:center">'+S.photos.length+'/10</p>':'';
+  var photoGrid=S.photos.length?'<div class="photo-grid">'+S.photos.map(function(p,i){return '<div class="photo-item"><img src="'+p.url+'"><button class="ph-del" onclick="delPhoto('+i+')">✕</button>'
+    +(p.geo?'<div style="position:absolute;bottom:26px;left:0;right:0;background:rgba(30,45,53,.78);color:#fff;font-size:8px;padding:2px 4px;text-align:center">📍 '+geoTxt(p.geo)+'</div>':'')
+    +'<div class="ph-cap"><input type="text" value="'+(p.caption||'')+'" placeholder="Légende..." oninput="S.photos['+i+'].caption=this.value"></div></div>';}).join('')+'</div><p style="font-size:12px;color:var(--mut);margin-top:6px;text-align:center">'+S.photos.length+'/10</p>':'';
+  var wa=S.envoi==='whatsapp';
   return '<div class="card"><div class="ct">📊 Récapitulatif</div>'+recap+'</div>'
-    +'<div class="card"><div class="ct">📧 Destinataires du rapport</div>'
-    +'<div class="f"><label>Email du client <span style="color:#ef4444">*</span></label><input type="email" id="f-email-client" value="'+(S.info.email_client||'')+'" placeholder="client@exemple.fr"></div>'
+    +'<div class="card"><div class="ct">📤 Envoi du rapport au client</div>'
+    +'<div style="display:flex;gap:8px;margin-bottom:12px">'
+    +envoiBtn('email','📧','Email','PDF en pièce jointe')
+    +envoiBtn('whatsapp','💬','WhatsApp','PDF partagé depuis votre téléphone')
+    +'</div>'
+    +(wa
+      ? '<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:9px;padding:11px 13px;font-size:12px;color:#166534;line-height:1.5">'
+        +'À la validation, la fenêtre de partage du téléphone s\'ouvre : choisissez <b>WhatsApp</b> puis le contact.<br>'
+        +'Le responsable reçoit une copie par email et le rapport est archivé dans Drive + le registre.'
+        +'<div style="margin-top:6px;color:#166534;font-weight:700">⚠️ L\'envoi WhatsApp dépend de vous : il n\'est pas automatique.</div></div>'
+        +'<div class="f" style="margin-top:12px"><label>Email du client <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--mut)">— optionnel</span></label>'
+        +'<input type="email" id="f-email-client" value="'+(S.info.email_client||'')+'" placeholder="client@exemple.fr"></div>'
+      : '<div class="f"><label>Email du client <span style="color:#ef4444">*</span></label><input type="email" id="f-email-client" value="'+(S.info.email_client||'')+'" placeholder="client@exemple.fr"></div>')
     +'<div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 8px">Responsable du chantier <span style="font-weight:400;text-transform:none;font-size:11px">(recevra aussi le rapport)</span></div>'
     +'<div class="rgrid">'+respCards+'</div>'
     +'</div>'
     +'<div class="card"><div class="ct">📸 Photos <span style="font-weight:400;text-transform:none;font-size:10px">(max 10)</span></div>'+photoGrid
     +(S.photos.length<10?'<label class="photo-upload"><input type="file" accept="image/*" multiple onchange="addPhotos(this)"><div style="font-size:32px;margin-bottom:6px">📷</div><div style="font-size:13px;color:var(--mut);font-weight:600">Ajouter des photos</div></label>':'')
+    +'</div>'
+    /* ── RÉSERVES DU CLIENT ──
+       Un rapport signé vaut PV de réception. Sans case "réserves", un client
+       qui signe en émettant une remarque n'en laisse aucune trace écrite. */
+    +'<div class="card"><div class="ct">⚠️ Réserves du client</div>'
+    +'<div onclick="togReserves()" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:9px;border:2px solid '+(S.reserves.has?'#f97316':'var(--brd)')+';background:'+(S.reserves.has?'#fff7ed':'#f8fafc')+'">'
+    +'<div style="width:22px;height:22px;border-radius:6px;flex-shrink:0;border:2px solid '+(S.reserves.has?'#f97316':'#cbd5e1')+';background:'+(S.reserves.has?'#f97316':'#fff')+';color:#fff;font-size:14px;font-weight:900;display:flex;align-items:center;justify-content:center">'+(S.reserves.has?'✓':'')+'</div>'
+    +'<div style="font-size:13px;font-weight:700;color:'+(S.reserves.has?'#9a3412':'var(--mut)')+'">Le client émet des réserves</div>'
+    +'</div>'
+    +(S.reserves.has
+      ? '<div class="f" style="margin-top:10px"><label>Nature des réserves <span style="color:#ef4444">*</span></label>'
+        +'<textarea id="f-reserves" rows="3" placeholder="Ex : trémie 5 cm trop large côté nord — à reprendre" style="width:100%;padding:11px;font-size:15px;border-radius:9px;border:1.5px solid var(--brd);font-family:inherit;resize:vertical">'+(S.reserves.texte||'')+'</textarea>'
+        +'<div style="font-size:11px;color:#9a3412;margin-top:5px">Ce texte apparaîtra en évidence sur le PDF, juste au-dessus de la signature.</div></div>'
+      : '<div style="font-size:11px;color:var(--mut);margin-top:7px">Aucune réserve : le PDF mentionnera « Travaux acceptés sans réserve ».</div>')
     +'</div>'
     +'<div class="card"><div class="ct">✍️ Signature client</div>'
     +(S.sig.absent
@@ -419,34 +634,129 @@ function step3(){
       : '<div class="f"><label>Nom du signataire</label><input type="text" id="f-signame" value="'+S.sig.name+'" placeholder="Prénom Nom"></div>'
         +'<div class="f"><label>Signature</label><canvas id="sigc" width="800" height="300"></canvas>'
         +'<button class="btn btn-o btn-sm" style="margin-top:8px" onclick="clearSig()">🗑 Effacer</button></div>'
+        +'<div style="font-size:11px;color:var(--mut)">🕓 La date et l\'heure de signature sont horodatées automatiquement sur le PDF.</div>'
     )
     +'<button onclick="toggleAbsent()" style="width:100%;margin-top:12px;padding:11px;border-radius:9px;border:2px solid '+(S.sig.absent?'#F5C400':'#e2e8f0')+';background:'+(S.sig.absent?'#1E2D35':'#f8fafc')+';color:'+(S.sig.absent?'#F5C400':'#64748b')+';font-size:13px;font-weight:700;cursor:pointer">'
     +(S.sig.absent?'✅ Client absent — annuler':'⚠️ Client absent — pas de signature')+'</button>'
+    +'</div>';
+}
+function selEnvoi(mode){saveStep3Fields();S.envoi=mode;R();}
+function togReserves(){saveStep3Fields();S.reserves.has=!S.reserves.has;R();}
+// Récupère les champs de l'étape 3 avant un re-rendu (sinon la saisie est perdue)
+function saveStep3Fields(){
+  var ec=document.getElementById('f-email-client');if(ec)S.info.email_client=ec.value.trim();
+  var rs=document.getElementById('f-reserves');if(rs)S.reserves.texte=rs.value;
+  var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;
+  if(sc&&!S.sig.absent)S.sig.url=sc.toDataURL();
+}
+
+/* ── ÉTAPE 4 : RÉCAPITULATIF AVANT ENVOI ──────────────────────────────
+   Le mail part chez le client, il n'y a pas de retour arrière. Dernier
+   contrôle : qui reçoit quoi, et ce que contient le rapport.
+   ──────────────────────────────────────────────────────────────────── */
+function step4(){
+  var c=S.info,t=metres(S.blocs),lignes=metresLignes(t);
+  var resp=EQUIPE.find(function(x){return x.id===S.resp;})||{nom:'—',email:''};
+  var wa=S.envoi==='whatsapp';
+  var fd=function(d){if(!d)return'—';var p=d.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
+  var num=(c.num||'—')+(c.visite&&parseInt(c.visite)>1?' / V'+parseInt(c.visite):'');
+  var pb=function(k,v,alerte){return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--brd)">'
+    +'<span style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0">'+k+'</span>'
+    +'<span style="font-size:14px;font-weight:700;color:'+(alerte?'#b91c1c':'var(--text)')+';text-align:right;word-break:break-word">'+v+'</span></div>';};
+
+  var manque=verifRapport();
+
+  return (manque.length
+      ? '<div class="card" style="border:2px solid #fca5a5;background:#fef2f2"><div class="ct" style="color:#b91c1c">🚫 À compléter avant l\'envoi</div>'
+        +manque.map(function(m){return '<div style="font-size:13px;color:#b91c1c;padding:4px 0">• '+m+'</div>';}).join('')
+        +'</div>'
+      : '<div class="card" style="border:2px solid #86efac;background:#f0fdf4"><div style="font-size:14px;font-weight:800;color:#166534">✅ Le rapport est complet — vérifiez avant d\'envoyer</div></div>')
+
+    +'<div class="card"><div class="ct">📤 Destinataires</div>'
+    +pb('Mode d\'envoi',wa?'💬 WhatsApp (partage manuel)':'📧 Email automatique')
+    +(wa
+      ? pb('Client','Partage WhatsApp depuis votre téléphone')
+      : pb('Client',S.sig.absent?'<span style="color:#92400e">Client absent — pas d\'envoi client</span>':(c.email_client||'—'),!S.sig.absent&&!c.email_client))
+    +pb('Responsable',resp.nom+(resp.email?' — '+resp.email:''),!S.resp)
     +'</div>'
-    +'<div class="info-box">📧 Le rapport PDF sera envoyé par email au responsable sélectionné'+(S.sig.absent?'':', ainsi qu\'au client')+'</div>';
+
+    +'<div class="card"><div class="ct">📋 Le rapport</div>'
+    +pb('N° de rapport',num)
+    +pb('Date',fd(c.date))
+    +pb('Chantier',c.addr||'—')
+    +pb('Client',c.client||'—')
+    +pb('Chef d\'équipe',c.tech||'—')
+    +pb('Niveaux',t.niveaux+' niveau(x)')
+    +pb('Photos',S.photos.length+' photo(s)')
+    +'</div>'
+
+    +'<div class="card"><div class="ct">📊 Métrés</div>'
+    +(lignes.length
+      ? lignes.map(function(r){return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:14px;padding:8px 0;border-bottom:1px solid var(--brd)">'
+          +'<span style="font-weight:700;color:var(--dk)">'+r[0]+'</span>'
+          +'<span style="text-align:right"><b>'+r[1]+'</b>'+(r[2]?'<br><span style="font-size:11px;color:var(--mut)">'+r[2]+'</span>':'')+'</span></div>';}).join('')
+        +'<div style="font-size:11px;color:var(--mut);margin-top:8px">Ces quantités partent dans le registre : elles servent au suivi de production et à la facturation.</div>'
+      : '<p style="font-size:14px;color:#b91c1c">Aucune prestation saisie</p>')
+    +'</div>'
+
+    +'<div class="card"><div class="ct">'+(S.reserves.has?'⚠️ Réserves':'✍️ Signature')+'</div>'
+    +(S.reserves.has
+      ? '<div style="background:#fff7ed;border-left:4px solid #f97316;border-radius:8px;padding:11px 13px;font-size:13px;color:#9a3412;line-height:1.5"><b>Le client émet des réserves :</b><br>'+(S.reserves.texte||'<i>— non précisées —</i>')+'</div>'
+      : '<div style="font-size:13px;color:#166534">Travaux acceptés sans réserve.</div>')
+    +'<div style="margin-top:10px">'
+    +(S.sig.absent
+      ? '<div style="font-size:13px;color:#92400e;font-weight:700">🚧 Client absent — mention officielle sur le PDF</div>'
+      : (S.sig.url
+        ? '<div style="font-size:13px;color:var(--mut)">Signé par <b style="color:var(--text)">'+(S.sig.name||'—')+'</b></div><img src="'+S.sig.url+'" style="max-height:70px;margin-top:6px">'
+        : '<div style="font-size:13px;color:#b91c1c;font-weight:700">Aucune signature tracée</div>'))
+    +'</div></div>';
+}
+// Contrôles bloquants avant l'envoi
+function verifRapport(){
+  var c=S.info,m=[];
+  if(!c.num||!c.num.trim())m.push('N° de rapport');
+  if(!c.addr||!c.addr.trim())m.push('Adresse / Nom du chantier');
+  if(!c.tech||!c.tech.trim())m.push('Chef d\'équipe');
+  if(!S.blocs.length)m.push('Aucun niveau saisi');
+  if(!S.resp)m.push('Responsable du chantier non sélectionné');
+  if(S.envoi==='email'&&!S.sig.absent){
+    if(!c.email_client)m.push('Email du client');
+    else if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.email_client))m.push('Email du client invalide');
+  }
+  if(S.reserves.has&&!(S.reserves.texte||'').trim())m.push('Nature des réserves');
+  if(!S.sig.absent&&!S.sig.url)m.push('Signature du client');
+  return m;
 }
 
 function addPhotos(input){
   var files=Array.from(input.files),rem=10-S.photos.length,toAdd=files.slice(0,rem);
   if(!toAdd.length)return;
   var done=0,total=toAdd.length;
+  var geoP=getGeo(); // demandé une fois, appliqué à toutes les photos du lot
+  var tagGeo=function(ph){geoP.then(function(g){ph.geo=g?{lat:g.lat,lng:g.lng,at:Date.now()}:{at:Date.now()};});};
   toAdd.forEach(function(f){
     var objUrl=URL.createObjectURL(f);
     var img=new Image();
     img.onload=function(){
       // Le navigateur applique automatiquement la rotation EXIF via drawImage
+      // Redimensionnement : côté long limité à PHOTO_MAX px (photo iPhone = 4032px)
+      var w=img.naturalWidth,h=img.naturalHeight;
+      var ratio=Math.min(1,PHOTO_MAX/Math.max(w,h));
       var cv=document.createElement('canvas');
-      cv.width=img.naturalWidth;cv.height=img.naturalHeight;
-      cv.getContext('2d').drawImage(img,0,0);
+      cv.width=Math.round(w*ratio);cv.height=Math.round(h*ratio);
+      var ctx=cv.getContext('2d');
+      ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+      ctx.drawImage(img,0,0,cv.width,cv.height);
       URL.revokeObjectURL(objUrl);
-      S.photos.push({url:cv.toDataURL('image/jpeg',0.85),caption:''});
+      var ph={url:cv.toDataURL('image/jpeg',PHOTO_Q),caption:'',geo:null};
+      S.photos.push(ph);tagGeo(ph);
       if(++done===total)R();
     };
     img.onerror=function(){
       // Fallback si createObjectURL échoue
       URL.revokeObjectURL(objUrl);
       var r=new FileReader();
-      r.onload=function(e){S.photos.push({url:e.target.result,caption:''});if(++done===total)R();};
+      r.onload=function(e){var ph={url:e.target.result,caption:'',geo:null};S.photos.push(ph);tagGeo(ph);if(++done===total)R();};
       r.readAsDataURL(f);
     };
     img.src=objUrl;
@@ -459,7 +769,14 @@ function delBloc(id){if(!confirm('Supprimer ce niveau ?'))return;S.blocs=S.blocs
 function bot(){
   if(S.step===1)return '<div class="bot"><button class="btn btn-p" style="flex:1" onclick="go(2)">Continuer → Saisir les travaux</button></div>';
   if(S.step===2)return '<div class="bot"><button class="btn btn-o btn-sm" onclick="go(1)">← Retour</button><button class="btn btn-y" style="flex:1" onclick="openM()">➕ Ajouter un niveau</button><button class="btn btn-p btn-sm" onclick="go(3)">Valider →</button></div>';
-  return '<div class="bot"><button class="btn btn-o btn-sm" onclick="go(2)">← Retour</button><button class="btn btn-wa" id="btn-gen" style="flex:1;background:#0284c7" onclick="generate()">📧 Générer & Envoyer par email</button></div>';
+  if(S.step===3)return '<div class="bot"><button class="btn btn-o btn-sm" onclick="go(2)">← Retour</button><button class="btn btn-p" style="flex:1" onclick="go(4)">🔍 Vérifier avant envoi →</button></div>';
+  // Étape 4 : dernier écran avant l'envoi
+  var bloque=verifRapport().length>0;
+  var wa=S.envoi==='whatsapp';
+  return '<div class="bot"><button class="btn btn-o btn-sm" onclick="go(3)">← Modifier</button>'
+    +'<button class="btn btn-wa" id="btn-gen" style="flex:1;background:'+(bloque?'#94a3b8':(wa?'#16a34a':'#0284c7'))+'" '+(bloque?'disabled':'')+' onclick="generate()">'
+    +(bloque?'⚠️ Rapport incomplet':(wa?'💬 Générer & Partager sur WhatsApp':'📧 Générer & Envoyer par email'))
+    +'</button></div>';
 }
 
 // ── MODAL ──
@@ -748,27 +1065,59 @@ function initSig(){
   function pos(e){var r=cv.getBoundingClientRect(),sw=cv.width/r.width,sh=cv.height/r.height,s=e.touches?e.touches[0]:e;return{x:(s.clientX-r.left)*sw,y:(s.clientY-r.top)*sh};}
   cv.addEventListener('mousedown',function(e){e.preventDefault();drawing=true;var p=pos(e);sx.beginPath();sx.moveTo(p.x,p.y);});
   cv.addEventListener('mousemove',function(e){if(!drawing)return;e.preventDefault();var p=pos(e);sx.lineTo(p.x,p.y);sx.stroke();});
-  cv.addEventListener('mouseup',function(){drawing=false;if(sc)S.sig.url=sc.toDataURL();});
+  cv.addEventListener('mouseup',function(){drawing=false;if(sc){S.sig.url=sc.toDataURL();S.sig.at=new Date().toISOString();}});
   cv.addEventListener('touchstart',function(e){e.preventDefault();drawing=true;var p=pos(e);sx.beginPath();sx.moveTo(p.x,p.y);},{passive:false});
   cv.addEventListener('touchmove',function(e){if(!drawing)return;e.preventDefault();var p=pos(e);sx.lineTo(p.x,p.y);sx.stroke();},{passive:false});
-  cv.addEventListener('touchend',function(){drawing=false;if(sc)S.sig.url=sc.toDataURL();});
+  cv.addEventListener('touchend',function(){drawing=false;if(sc){S.sig.url=sc.toDataURL();S.sig.at=new Date().toISOString();}});
 }
-function clearSig(){if(sc&&sx){sx.clearRect(0,0,sc.width,sc.height);S.sig.url='';}}
+function clearSig(){if(sc&&sx){sx.clearRect(0,0,sc.width,sc.height);S.sig.url='';S.sig.at='';}}
+/* ── RÉSERVE DE NUMÉROS ────────────────────────────────────────────────
+   Le compteur est centralisé sur le serveur : sans réseau, impossible
+   d'obtenir un numéro. On en met donc RESERVE_CIBLE d'avance de côté
+   dès qu'il y a du réseau. Le bouton 🔢 Auto pioche dans cette réserve
+   et fonctionne donc même en sous-sol.
+   Note : un numéro réservé mais non utilisé laisse un trou dans le
+   registre — c'est normal et sans conséquence.
+   ──────────────────────────────────────────────────────────────────── */
+var RESERVE_CIBLE=3, refilling=false;
+function reserveGet(){try{return JSON.parse(localStorage.getItem('cb_num_reserve')||'[]');}catch(e){return [];}}
+function reserveSet(a){try{localStorage.setItem('cb_num_reserve',JSON.stringify(a));}catch(e){}}
+async function refillReserve(){
+  if(refilling||!navigator.onLine)return;
+  var r=reserveGet();
+  var manque=RESERVE_CIBLE-r.length;
+  if(manque<=0)return;
+  refilling=true;
+  try{
+    var res=await fetch(APPS_SCRIPT_URL+'?action=nextNum&count='+manque+'&token='+encodeURIComponent(APP_TOKEN));
+    var data=await res.json();
+    if(data&&data.ok){
+      var nums=data.nums||(data.num?[data.num]:[]);
+      reserveSet(reserveGet().concat(nums));
+    }
+  }catch(e){/* pas de réseau : on retentera */}
+  finally{refilling=false;}
+}
 async function getNumAuto(){
   var btn=document.getElementById('btn-num');
   if(btn){btn.textContent='⏳';btn.disabled=true;}
   try{
-    var res=await fetch(APPS_SCRIPT_URL+'?action=nextNum');
-    var data=await res.json();
-    if(data.ok){
-      S.info.num=data.num;
-      var el=document.getElementById('f-num');
-      if(el)el.value=data.num;
-    }else{
-      alert('Erreur lors de la génération : '+(data.error||'inconnue'));
+    var r=reserveGet();
+    if(!r.length){
+      if(!navigator.onLine){
+        alert('📴 Pas de réseau et aucun numéro en réserve.\n\n➡️ Saisissez le N° à la main pour l\'instant, ou reconnectez-vous quelques secondes : l\'appli met 3 numéros de côté pour les prochains chantiers hors ligne.');
+        return;
+      }
+      await refillReserve();
+      r=reserveGet();
+      if(!r.length){alert('⚠️ Impossible de générer le numéro.\nVérifiez votre connexion internet.');return;}
     }
-  }catch(e){
-    alert('⚠️ Impossible de générer le numéro.\nVérifiez votre connexion internet.');
+    var num=r.shift();
+    reserveSet(r);
+    S.info.num=num;
+    var el=document.getElementById('f-num');
+    if(el)el.value=num;
+    refillReserve(); // on recomplète la réserve en arrière-plan
   }finally{
     if(btn){btn.textContent='🔢 Auto';btn.disabled=false;}
   }
@@ -783,13 +1132,22 @@ function toggleAbsent(){
 
 function events(){
   if(S.step===1){
-    [['date','date'],['num','num'],['visite','visite'],['addr','addr'],['client','client'],['tech','tech'],['date-debut','date_debut'],['date-fin','date_fin']].forEach(function(pair){
+    [['date','date'],['num','num'],['visite','visite'],['addr','addr'],['client','client'],['date-debut','date_debut'],['date-fin','date_fin']].forEach(function(pair){
       var el=document.getElementById('f-'+pair[0]);if(el)el.addEventListener('input',function(ev){S.info[pair[1]]=ev.target.value;});
     });
+    // Chef d'équipe : liste déroulante + option « Autre »
+    var ts=document.getElementById('f-tech');
+    if(ts)ts.addEventListener('change',function(e){
+      if(e.target.value==='__autre__'){S.techAutre=true;S.info.tech='';R();}
+      else{S.techAutre=false;S.info.tech=e.target.value;memoTech(e.target.value);}
+    });
+    var tl=document.getElementById('f-tech-libre');
+    if(tl)tl.addEventListener('input',function(e){S.info.tech=e.target.value;memoTech(e.target.value);});
   }
   if(S.step===3){
     var sn=document.getElementById('f-signame');if(sn)sn.addEventListener('input',function(e){S.sig.name=e.target.value;});
     var ec=document.getElementById('f-email-client');if(ec)ec.addEventListener('input',function(e){S.info.email_client=e.target.value.trim();});
+    var rs=document.getElementById('f-reserves');if(rs)rs.addEventListener('input',function(e){S.reserves.texte=e.target.value;});
     if(!S.sig.absent)setTimeout(initSig,50);
   }
 }
@@ -800,38 +1158,33 @@ function go(step){
     if(!c.num||!c.num.trim())manquants.push('N° de rapport');
     if(!c.addr||!c.addr.trim())manquants.push('Adresse / Nom du chantier');
     if(!c.client||!c.client.trim())manquants.push('Client');
-    if(!c.tech||!c.tech.trim())manquants.push('Nom du technicien');
+    if(!c.tech||!c.tech.trim())manquants.push('Chef d\'équipe');
     if(manquants.length){alert('⚠️ Champs obligatoires manquants :\n• '+manquants.join('\n• '));return;}
   }
-  if(S.step===3){var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;if(sc)S.sig.url=sc.toDataURL();}
+  if(S.step===3)saveStep3Fields();
   S.step=step;R();window.scrollTo(0,0);
 }
 
 // ── GENERATE ──
 async function generate(){
-  // Récupérer l'email client avant validation
-  var ecEl=document.getElementById('f-email-client');
-  if(ecEl)S.info.email_client=ecEl.value.trim();
-  if(!S.resp){alert('⚠️ Veuillez sélectionner le responsable du chantier.');return;}
-  if(!S.sig.absent){
-    if(!S.info.email_client){alert('⚠️ Veuillez renseigner l\'email du client.');return;}
-    var emailRegex=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if(!emailRegex.test(S.info.email_client)){alert('⚠️ L\'adresse email du client n\'est pas valide.');return;}
-  }
-  if(!S.sig.absent){var sn=document.getElementById('f-signame');if(sn)S.sig.name=sn.value;if(sc)S.sig.url=sc.toDataURL();}
+  // Dernier contrôle : mêmes règles que l'écran de vérification (étape 4)
+  var manque=verifRapport();
+  if(manque.length){alert('⚠️ Rapport incomplet :\n• '+manque.join('\n• '));return;}
   var btn=document.getElementById('btn-gen');if(btn){btn.textContent='⏳ Génération PDF...';btn.disabled=true;}
   try{
     var c=S.info,sig=S.sig,resp=EQUIPE.find(function(x){return x.id===S.resp;})||{nom:'—',email:''};
     // Numéro complet : base + suffixe visite si > 1
     var numBase=c.num||'001';
     var numComplet=numBase+(c.visite&&parseInt(c.visite)>1?' / V'+parseInt(c.visite):'');
-    var cAvecNum=Object.assign({},c,{numComplet:numComplet});
+    // reserves et envoi voyagent avec les infos : PDF, historique et registre les lisent
+    var cAvecNum=Object.assign({},c,{numComplet:numComplet,reserves:JSON.parse(JSON.stringify(S.reserves)),envoi:S.envoi});
     var filename='rapport-chokbeton-'+(c.date||'chantier')+'-'+numBase.replace(/[^a-zA-Z0-9]/g,'_')+(c.visite&&parseInt(c.visite)>1?'_V'+parseInt(c.visite):'')+'.pdf';
     saveToHistory(filename,cAvecNum,resp,S.blocs,sig,S.photos);
     var blob=await buildPDFFromData(cAvecNum,S.blocs,sig,S.photos,resp,filename);
+    lastPDF={blob:blob,filename:filename,num:numComplet,addr:c.addr||''};
     await envoyerParEmail(blob,filename,cAvecNum,resp);
   }catch(e){alert('Erreur : '+e.message);}
-  finally{if(btn){btn.textContent='📧 Générer & Envoyer par email';btn.disabled=false;}}
+  finally{if(btn){btn.textContent=S.envoi==='whatsapp'?'💬 Générer & Partager sur WhatsApp':'📧 Générer & Envoyer par email';btn.disabled=false;}}
 }
 
 // ── PDF ──
@@ -966,22 +1319,12 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
     y+=bodyH+5;
   });y+=3;
 
-  // Récap
-  secTitle('RÉCAPITULATIF');
-  var tCar=0,tSci=0,tCb=0,tOuv=0,tOuvSci=0;
-  blocs.forEach(function(b){
-    (b.carottages||[]).forEach(function(l){tCar+=parseInt(l.nb||0);});
-    (b.sciages||[]).forEach(function(l){tSci+=parseFloat(l.ml||0);});
-    (b.carbones||[]).forEach(function(l){tCb+=parseInt(l.nbl||0);});
-    tOuv+=(b.ouvertures||[]).length;
-    tOuvSci+=(b.ouvsciages||[]).length;
+  // Récap — quantités calculées par metres() : mêmes chiffres à l'écran, sur le PDF et dans le registre
+  secTitle('RÉCAPITULATIF DES MÉTRÉS');
+  var T=metres(blocs);
+  var rr=metresLignes(T).map(function(l){
+    return [l[0], l[2]||'—', l[1]]; // [prestation, quantité détaillée, total]
   });
-  var rr=[];
-  if(tCar>0)rr.push(['Carottage',blocs.filter(function(b){return (b.carottages||[]).length>0;}).length+' niveau(x)',tCar+' carottage(s)']);
-  if(tSci>0)rr.push(['Sciage',blocs.filter(function(b){return (b.sciages||[]).length>0;}).length+' niveau(x)',tSci+' ml']);
-  if(tCb>0)rr.push(['Lamelles carbone',blocs.filter(function(b){return (b.carbones||[]).length>0;}).length+' niveau(x)',tCb+' lamelle(s)']);
-  if(tOuv>0)rr.push(['Ouvertures carottages',blocs.filter(function(b){return (b.ouvertures||[]).length>0;}).length+' niveau(x)',tOuv+' ouverture(s)']);
-  if(tOuvSci>0)rr.push(['Ouvertures sciage',blocs.filter(function(b){return (b.ouvsciages||[]).length>0;}).length+' niveau(x)',tOuvSci+' ouverture(s)']);
   if(rr.length){
     var tableW=PW-2*M; // 182mm
     var RH=11,yTop=y;
@@ -991,7 +1334,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
     doc.setFillColor(DRK[0],DRK[1],DRK[2]);doc.rect(M,y,tableW,RH,'F');
     doc.setFontSize(6.5);doc.setFont('helvetica','bold');doc.setTextColor(YEL[0],YEL[1],YEL[2]);
     doc.text('PRESTATION',xC1,y+7.5);
-    doc.text('NIVEAUX',xC2,y+7.5);
+    doc.text('MÉTRÉ',xC2,y+7.5);
     doc.text('QUANTITÉ',xC3,y+7.5,{align:'right'});
     y+=RH;
     // ── Lignes de données ──
@@ -1044,15 +1387,50 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
         doc.addImage(imgUrl,imgFmt,px,y,iw2,ih);
         doc.setDrawColor(BRD[0],BRD[1],BRD[2]);doc.setLineWidth(0.3);doc.line(px,y,px+iw2,y);doc.line(px,y+ih,px+iw2,y+ih);doc.line(px,y,px,y+ih);doc.line(px+iw2,y,px+iw2,y+ih);
         if(photos[pi].caption){doc.setFillColor(LGT[0],LGT[1],LGT[2]);doc.rect(px,y+ih-6,iw2,6,'F');doc.setFontSize(7);doc.setTextColor(DRK[0],DRK[1],DRK[2]);doc.text(photos[pi].caption.substring(0,40),px+2,y+ih-1.5);}
+        // Horodatage + coordonnées GPS : preuve du bon chantier, au bon moment
+        var gt=geoTxt(photos[pi].geo);
+        if(gt){
+          doc.setFillColor(30,45,53);doc.rect(px,y,iw2,4.6,'F');
+          doc.setFontSize(5.6);doc.setFont('helvetica','normal');doc.setTextColor(245,196,0);
+          doc.text(gt,px+2,y+3.2);
+        }
       }catch(e){}
       col++;if(col>=2){col=0;y+=ih+8;}
     }
     if(col>0)y+=ih+8;y+=4;
   }
 
+  // ── RÉSERVES DU CLIENT ──
+  // Un rapport signé vaut PV de réception : les réserves doivent être écrites,
+  // en évidence, juste avant la signature.
+  var RES=(c.reserves&&c.reserves.has&&(c.reserves.texte||'').trim())?c.reserves.texte.trim():'';
+  if(RES){
+    var resLines=doc.splitTextToSize(RES,PW-2*M-14);
+    var resH=16+resLines.length*5+4;
+    if(y+resH>PH-30){doc.addPage();y=15;}
+    secTitle('RÉSERVES ÉMISES PAR LE CLIENT');
+    doc.setFillColor(255,247,237);doc.setDrawColor(249,115,22);doc.setLineWidth(0.5);
+    doc.roundedRect(M,y,PW-2*M,resH,1,1,'FD');
+    doc.setFillColor(249,115,22);doc.rect(M,y,3.5,resH,'F');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(154,52,18);
+    doc.text('Le client accepte les travaux SOUS RESERVE(S) :',M+8,y+8);
+    doc.setFontSize(9);doc.setFont('helvetica','normal');doc.setTextColor(60,30,10);
+    resLines.forEach(function(l,i){doc.text(l,M+8,y+15+i*5);});
+    doc.setLineWidth(0.2);doc.setDrawColor(BRD[0],BRD[1],BRD[2]);
+    y+=resH+6;
+  }else if(!sig.absent){
+    if(y+12>PH-30){doc.addPage();y=15;}
+    doc.setFillColor(240,253,244);doc.setDrawColor(134,239,172);doc.setLineWidth(0.4);
+    doc.roundedRect(M,y,PW-2*M,10,1,1,'FD');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(22,101,52);
+    doc.text('Travaux acceptes SANS RESERVE par le client.',M+6,y+6.5);
+    doc.setLineWidth(0.2);doc.setDrawColor(BRD[0],BRD[1],BRD[2]);
+    y+=14;
+  }
+
   // ── SIGNATURE & VALIDATION ──
   if(y>PH-72){doc.addPage();y=15;}
-  secTitle(sig.absent?'RAPPORT SANS SIGNATURE CLIENT':'VALIDATION CLIENT — BON POUR ACCORD');
+  secTitle(sig.absent?'RAPPORT SANS SIGNATURE CLIENT':(RES?'VALIDATION CLIENT — ACCORD AVEC RESERVES':'VALIDATION CLIENT — BON POUR ACCORD'));
   var sigW=(PW-2*M-5)/2;
   // Bloc gauche : signature client OU mention absent
   if(sig.absent){
@@ -1080,7 +1458,7 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
     doc.setFontSize(9);doc.setFont('helvetica','bold');set(null,null,DRK);
     doc.text(sig.name||'—',M+sigW/2,y+20,{align:'center'});
     doc.setFontSize(7);doc.setFont('helvetica','normal');set(null,null,GRY);
-    doc.text('Lu et approuvé — Bon pour accord',M+sigW/2,y+26,{align:'center'});
+    doc.text(RES?'Lu et approuvé — Accord SOUS RÉSERVES':'Lu et approuvé — Bon pour accord',M+sigW/2,y+26,{align:'center'});
     if(sig.url){
       try{doc.addImage(sig.url,'PNG',M+sigW/2-20,y+29,40,20);}catch(e){}
     }else{
@@ -1090,8 +1468,14 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
       doc.setFontSize(7);set(null,null,[200,210,215]);
       doc.text('Signature',M+sigW/2,y+41,{align:'center'});
     }
+    // Horodatage de la signature : une signature sans date a une faible valeur probante
     doc.setFontSize(8);doc.setFont('helvetica','normal');set(null,null,GRY);
-    doc.text('Date : '+fd(c.date),M+sigW/2,y+56,{align:'center'});
+    var sAt=sig.at?new Date(sig.at):null;
+    var sTxt=sAt&&!isNaN(sAt)
+      ? 'Signé le '+('0'+sAt.getDate()).slice(-2)+'/'+('0'+(sAt.getMonth()+1)).slice(-2)+'/'+sAt.getFullYear()
+        +' à '+('0'+sAt.getHours()).slice(-2)+'h'+('0'+sAt.getMinutes()).slice(-2)
+      : 'Date : '+fd(c.date);
+    doc.text(sTxt,M+sigW/2,y+56,{align:'center'});
   }
   // Bloc droit : bon pour accord
   var rx=M+sigW+5;
@@ -1139,73 +1523,331 @@ async function buildPDFFromData(c,blocs,sig,photos,resp,filename){
   return doc.output('blob');
 }
 
-// ── ENVOI PAR EMAIL VIA GOOGLE APPS SCRIPT ──
-async function envoyerParEmail(blob,filename,c,resp){
-  var emailClient=c.email_client||'';
-  var emailResp=resp.email||'';
-  var fd=function(d){if(!d)return'-';var p=d.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
-  var subject="Rapport CHOK BETON - N "+(c.num||'-')+" - "+(c.addr||'-');
-  var corps="Bonjour,\n\nVeuillez trouver ci-joint le rapport de chantier CHOK BETON.\n\n"
-    +"Chantier : "+(c.addr||'-')+"\n"
-    +"Date : "+fd(c.date)+"\n"
-    +"N de rapport : "+(c.numComplet||c.num||'-')+"\n"
-    +"Technicien : "+(c.tech||'-')+"\n"
-    +(c.client?"Client : "+c.client+"\n":"")+"\n"
-    +"Cordialement,\nL'equipe CHOK BETON\n"
-    +"1 Rue Hector Berlioz - 95210 SAINT GRATIEN";
+/* ══════════════════════════════════════════════════════════════════════
+   FILE D'ATTENTE HORS LIGNE
+   Sur chantier (sous-sol, zone blanche), le réseau tombe. Tout rapport
+   généré est d'abord ENREGISTRÉ dans IndexedDB (le PDF est stocké tel
+   quel, pas en base64 : localStorage exploserait à 5 Mo), puis envoyé.
+   S'il n'y a pas de réseau, il reste en file et repart tout seul :
+   au retour du réseau, à la réouverture de l'appli, et toutes les 60 s.
+   Rien n'est jamais perdu, et rien n'est envoyé deux fois.
+   ══════════════════════════════════════════════════════════════════════ */
+var DB_NAME='chokbeton',DB_STORE='queue',DB_VER=1;
+var flushing=false,queueCount=0,queuePanelOpen=false;
 
-  // Vérification que l'URL Apps Script est configurée
-  if(!APPS_SCRIPT_URL||APPS_SCRIPT_URL==='COLLER_ICI_VOTRE_URL_APPS_SCRIPT'){
-    // Fallback si Apps Script pas encore configuré : téléchargement + mail natif
-    _fallbackEmail(blob,filename,emailClient,emailResp,subject,corps);
-    return;
-  }
+function idb(){
+  return new Promise(function(resolve,reject){
+    var rq=indexedDB.open(DB_NAME,DB_VER);
+    rq.onupgradeneeded=function(e){
+      var db=e.target.result;
+      if(!db.objectStoreNames.contains(DB_STORE))db.createObjectStore(DB_STORE,{keyPath:'id'});
+    };
+    rq.onsuccess=function(){resolve(rq.result);};
+    rq.onerror=function(){reject(rq.error||new Error('IndexedDB indisponible'));};
+  });
+}
+function idbTx(mode,fn){
+  return idb().then(function(db){
+    return new Promise(function(resolve,reject){
+      var tx=db.transaction(DB_STORE,mode),st=tx.objectStore(DB_STORE),out;
+      out=fn(st);
+      tx.oncomplete=function(){resolve(out&&out.result!==undefined?out.result:out);};
+      tx.onerror=function(){reject(tx.error);};
+      tx.onabort=function(){reject(tx.error||new Error('Transaction annulée'));};
+    });
+  });
+}
+function qAdd(item){return idbTx('readwrite',function(st){return st.add(item);});}
+function qPut(item){return idbTx('readwrite',function(st){return st.put(item);});}
+function qDel(id){return idbTx('readwrite',function(st){return st.delete(id);});}
+function qAll(){
+  return idbTx('readonly',function(st){return st.getAll();}).then(function(list){
+    return (list||[]).sort(function(a,b){return a.createdAt-b.createdAt;}); // FIFO
+  }).catch(function(){return [];});
+}
+function qGet(id){return idbTx('readonly',function(st){return st.get(id);});}
 
-  // Conversion du PDF en base64
-  var btn=document.getElementById('btn-gen');
-  if(btn)btn.textContent='⏳ Envoi en cours...';
+// ── ENVOI D'UN ÉLÉMENT DE LA FILE ──
+async function sendItem(item){
   var base64=await new Promise(function(resolve,reject){
     var reader=new FileReader();
     reader.onload=function(){resolve(reader.result.split(',')[1]);};
-    reader.onerror=reject;
-    reader.readAsDataURL(blob);
+    reader.onerror=function(){reject(new Error('Lecture du PDF impossible'));};
+    reader.readAsDataURL(item.blob);
   });
+  // msgId : identifiant unique du rapport. Si le réseau coupe après l'envoi mais
+  // avant la réponse, le serveur reconnaît le renvoi et n'envoie pas 2 fois.
+  var payload=Object.assign({token:APP_TOKEN,msgId:item.id,pdf:base64,filename:item.filename},item.meta);
+  var res=await fetch(APPS_SCRIPT_URL,{
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify(payload)
+  });
+  if(!res.ok)throw new Error('Serveur injoignable (HTTP '+res.status+')');
+  var out=await res.json();
+  if(!out||out.success!==true)throw new Error(out&&out.error?out.error:'Envoi refusé par le serveur');
+  return true;
+}
+
+// ── VIDAGE DE LA FILE (FIFO, on s'arrête à la 1re erreur réseau) ──
+async function flushQueue(silencieux){
+  if(flushing)return {envoyes:0,restants:queueCount};
+  var items=await qAll();
+  if(!items.length){queueCount=0;renderQueue();return {envoyes:0,restants:0};}
+  if(!navigator.onLine){queueCount=items.length;renderQueue();return {envoyes:0,restants:items.length};}
+
+  flushing=true;renderQueue();
+  var envoyes=0;
+  try{
+    for(var i=0;i<items.length;i++){
+      var it=items[i];
+      try{
+        await sendItem(it);
+        await qDel(it.id);
+        envoyes++;
+      }catch(err){
+        it.tries=(it.tries||0)+1;
+        it.lastError=err.message;
+        it.lastTry=Date.now();
+        try{await qPut(it);}catch(e){}
+        break; // réseau/serveur KO : inutile d'insister sur les suivants
+      }
+    }
+  }finally{
+    flushing=false;
+  }
+  var reste=await qAll();
+  queueCount=reste.length;
+  renderQueue();
+  if(envoyes>0&&!silencieux){
+    alert('✅ '+envoyes+' rapport'+(envoyes>1?'s':'')+' en attente '+(envoyes>1?'ont':'a')+' été envoyé'+(envoyes>1?'s':'')+' avec succès.');
+  }
+  return {envoyes:envoyes,restants:reste.length};
+}
+
+// ── BANDEAU + PANNEAU DE LA FILE ──
+function renderQueue(){
+  var bar=document.getElementById('qbar');if(!bar)return;
+  var offline=!navigator.onLine;
+  if(!queueCount&&!offline){bar.innerHTML='';return;}
+
+  var msg,bg,bd,fg;
+  if(queueCount){
+    bg='#fffbeb';bd='#fcd34d';fg='#92400e';
+    msg='⏳ <b>'+queueCount+' rapport'+(queueCount>1?'s':'')+' en attente d\'envoi</b>'
+      +(offline?' — 📴 hors ligne, envoi automatique au retour du réseau'
+               :(flushing?' — envoi en cours…':' — sera renvoyé automatiquement'));
+  }else{
+    bg='#f1f5f9';bd='#cbd5e1';fg='#475569';
+    msg='📴 <b>Hors ligne</b> — vous pouvez continuer, les rapports partiront au retour du réseau';
+  }
+  bar.innerHTML='<div style="background:'+bg+';border-bottom:1px solid '+bd+';color:'+fg
+    +';padding:8px 12px;font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+    +'<div style="flex:1;min-width:180px;line-height:1.4">'+msg+'</div>'
+    +(queueCount?'<button onclick="toggleQueuePanel()" style="background:#fff;border:1px solid '+bd+';color:'+fg+';border-radius:6px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">'+(queuePanelOpen?'Masquer':'Détail')+'</button>':'')
+    +(queueCount&&!offline&&!flushing?'<button onclick="flushQueue()" style="background:var(--dk);border:none;color:var(--y);border-radius:6px;padding:4px 9px;font-size:11px;font-weight:800;cursor:pointer">↻ Envoyer</button>':'')
+    +'</div>'
+    +(queuePanelOpen?'<div id="qlist" style="background:#fff;border-bottom:1px solid '+bd+'"></div>':'');
+  if(queuePanelOpen)renderQueueList();
+}
+function toggleQueuePanel(){queuePanelOpen=!queuePanelOpen;renderQueue();}
+async function renderQueueList(){
+  var el=document.getElementById('qlist');if(!el)return;
+  var items=await qAll();
+  if(!items.length){el.innerHTML='';return;}
+  el.innerHTML=items.map(function(it){
+    var d=new Date(it.createdAt);
+    var hh=('0'+d.getHours()).slice(-2)+'h'+('0'+d.getMinutes()).slice(-2);
+    return '<div style="padding:9px 12px;border-bottom:1px solid var(--brd);display:flex;align-items:center;gap:8px">'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="font-size:12px;font-weight:800;color:var(--text)">N° '+(it.meta.num||'—')+' — '+(it.meta.addr||'—')+'</div>'
+      +'<div style="font-size:10px;color:var(--mut);margin-top:2px">Créé à '+hh+' · '+(it.tries||0)+' tentative'+((it.tries||0)>1?'s':'')
+      +(it.lastError?' · <span style="color:#b91c1c">'+it.lastError+'</span>':'')+'</div>'
+      +'</div>'
+      +'<button onclick="queueSendOne('+it.id+')" title="Renvoyer" style="background:var(--dk);border:none;color:var(--y);border-radius:6px;padding:5px 8px;font-size:11px;font-weight:800;cursor:pointer">↻</button>'
+      +'<button onclick="queueMailManuel('+it.id+')" title="Envoyer depuis l\'app Mail" style="background:#e0f2fe;border:1px solid #7dd3fc;color:#0369a1;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer">📎</button>'
+      +'<button onclick="queueDelete('+it.id+')" title="Supprimer de la file" style="background:#fee2e2;border:1px solid #fca5a5;color:#b91c1c;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer">🗑</button>'
+      +'</div>';
+  }).join('');
+}
+async function queueSendOne(id){
+  if(!navigator.onLine){alert('📴 Pas de réseau.\nLe rapport partira automatiquement dès que le téléphone captera.');return;}
+  var it=await qGet(id);if(!it)return;
+  try{
+    await sendItem(it);
+    await qDel(id);
+    queueCount=(await qAll()).length;renderQueue();
+    alert('✅ Rapport N° '+(it.meta.num||'—')+' envoyé.');
+  }catch(err){
+    it.tries=(it.tries||0)+1;it.lastError=err.message;it.lastTry=Date.now();
+    try{await qPut(it);}catch(e){}
+    renderQueue();
+    alert('❌ Envoi impossible : '+err.message);
+  }
+}
+async function queueDelete(id){
+  var it=await qGet(id);if(!it)return;
+  if(!confirm('Supprimer définitivement le rapport N° '+(it.meta.num||'—')+' de la file ?\n\n⚠️ Il ne sera JAMAIS envoyé au client.'))return;
+  await qDel(id);
+  queueCount=(await qAll()).length;renderQueue();
+}
+// Envoi manuel via l'app Mail du téléphone (le mail partira au retour du réseau).
+// On retire alors le rapport de la file pour éviter un double envoi.
+async function queueMailManuel(id){
+  var it=await qGet(id);if(!it)return;
+  if(!confirm('Envoyer le rapport N° '+(it.meta.num||'—')+' depuis votre application mail ?\n\nIl sera retiré de la file d\'attente (pas de double envoi), mais il ne sera PAS archivé dans Drive ni dans le registre.'))return;
+  _fallbackEmail(it.blob,it.filename,it.meta.to,it.meta.cc,it.meta.subject,it.meta.body);
+  await qDel(id);
+  queueCount=(await qAll()).length;renderQueue();
+}
+
+/* ── PARTAGE NATIF (WhatsApp) ──────────────────────────────────────────
+   WhatsApp n'accepte pas de pièce jointe via un lien : on passe par la
+   fenêtre de partage du téléphone, qui transmet le vrai fichier PDF.
+   Doit être appelé juste après un geste de l'utilisateur (sinon iOS refuse).
+   ──────────────────────────────────────────────────────────────────── */
+function telechargerPDF(blob,filename){
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download=filename;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url);},2000);
+}
+async function partagerPDF(blob,filename,c){
+  try{
+    var file=new File([blob],filename,{type:'application/pdf'});
+    if(!navigator.canShare||!navigator.canShare({files:[file]}))throw new Error('non-supporte');
+    await navigator.share({
+      files:[file],
+      title:'Rapport CHOK BETON — N° '+(c.numComplet||c.num||''),
+      text:'Bonjour, voici le rapport de chantier CHOK BETON.\n'
+        +'N° '+(c.numComplet||c.num||'-')+' — '+(c.addr||'-')
+    });
+    return true;
+  }catch(e){
+    if(e&&e.name==='AbortError'){
+      alert('Partage annulé.\n\nLe rapport reste disponible dans 📋 Historique → 📄 Renvoyer.');
+      return false;
+    }
+    // Ordinateur ou navigateur sans partage de fichier → téléchargement
+    telechargerPDF(blob,filename);
+    alert('📎 Le partage direct n\'est pas disponible sur cet appareil.\nLe PDF a été téléchargé : envoyez-le manuellement depuis WhatsApp.');
+    return false;
+  }
+}
+
+// ── MISE EN FILE + TENTATIVE D'ENVOI IMMÉDIATE ──
+async function envoyerParEmail(blob,filename,c,resp){
+  var wa=(c.envoi==='whatsapp');
+  var emailClient=c.email_client||'';
+  var emailResp=resp.email||'';
+  var fd=function(d){if(!d)return'-';var p=d.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
+  var subject=(wa?'[WhatsApp] ':'')+"Rapport CHOK BETON - N "+(c.num||'-')+" - "+(c.addr||'-');
+  var t=metres(S.blocs);
+  var res=(c.reserves&&c.reserves.has&&(c.reserves.texte||'').trim())?c.reserves.texte.trim():'';
+  var corps=(wa
+      ? "Rapport transmis au client par WhatsApp.\nCopie pour archivage.\n\n"
+      : "Bonjour,\n\nVeuillez trouver ci-joint le rapport de chantier CHOK BETON.\n\n")
+    +"Chantier : "+(c.addr||'-')+"\n"
+    +"Date : "+fd(c.date)+"\n"
+    +"N de rapport : "+(c.numComplet||c.num||'-')+"\n"
+    +"Chef d'equipe : "+(c.tech||'-')+"\n"
+    +(c.client?"Client : "+c.client+"\n":"")
+    +(res?"\nRESERVES DU CLIENT : "+res+"\n":"")+"\n"
+    +"Cordialement,\nL'equipe CHOK BETON\n"
+    +"1 Rue Hector Berlioz - 95210 SAINT GRATIEN";
 
   var clientAbsent=S.sig&&S.sig.absent;
-  var emailTo=(!clientAbsent&&emailClient)?emailClient:emailResp;
-  var emailCc=(!clientAbsent&&emailClient)?emailResp:'';
-  var payload={
-    // Destinataires
-    to:emailTo,
-    cc:emailCc,
-    // Contenu email
-    subject:subject,
-    body:corps,
+  // WhatsApp : le client reçoit le PDF par partage, le serveur n'envoie qu'au responsable
+  var emailTo=wa?emailResp:((!clientAbsent&&emailClient)?emailClient:emailResp);
+  var emailCc=wa?'':((!clientAbsent&&emailClient)?emailResp:'');
+
+  // Garde-fou : Gmail refuse les pièces jointes > 25 Mo
+  var pdfMo=blob.size/1048576;
+  if(pdfMo>20){
+    alert('⚠️ Le PDF fait '+pdfMo.toFixed(1)+' Mo, c\'est trop lourd pour un envoi par email.\nSupprimez quelques photos et réessayez.');
+    return;
+  }
+
+  // Apps Script pas configuré : envoi manuel direct
+  if(!APPS_SCRIPT_URL||APPS_SCRIPT_URL==='COLLER_ICI_VOTRE_URL_APPS_SCRIPT'){
+    if(wa)await partagerPDF(blob,filename,c);
+    else _fallbackEmail(blob,filename,emailTo,emailCc,subject,corps);
+    return;
+  }
+
+  // WhatsApp : on ouvre la fenêtre de partage TOUT DE SUITE (iOS exige un geste récent).
+  // L'archivage serveur, lui, peut attendre le réseau.
+  if(wa)await partagerPDF(blob,filename,c);
+
+  var item={
+    id:Date.now(),
+    createdAt:Date.now(),
     filename:filename,
-    pdf:base64,
-    // Données pour archivage (Drive + Sheets)
-    num:c.numComplet||c.num||'—',
-    addr:c.addr||'—',
-    client:c.client||'—',
-    tech:c.tech||'—',
-    responsable:resp.nom||'—',
-    date:c.date||''
+    blob:blob,
+    tries:0,
+    lastError:'',
+    meta:{
+      to:emailTo, cc:emailCc,
+      subject:subject, body:corps,
+      num:c.numComplet||c.num||'—',
+      addr:c.addr||'—',
+      client:c.client||'—',
+      tech:c.tech||'—',
+      responsable:resp.nom||'—',
+      date:c.date||'',
+      envoi:wa?'WhatsApp':'Email',
+      reserves:res,
+      // Métrés → colonnes du registre (suivi de production / facturation)
+      nbCar:t.nbCar, mlCar:t.mlCar,
+      mlSci:t.mlSci, m2Sci:t.m2Sci,
+      nbCb:t.nbCb,   mlCb:t.mlCb,
+      nbOuv:t.nbOuvCar+t.nbOuvSci,
+      m2Ouv:Math.round((t.m2OuvCar+t.m2OuvSci)*100)/100,
+      niveaux:t.niveaux,
+      photos:(S.photos||[]).length
+    }
   };
 
+  // 1. On sécurise d'abord : le rapport est enregistré AVANT toute tentative réseau
   try{
-    // Envoi via Google Apps Script (Content-Type text/plain évite le preflight CORS)
-    await fetch(APPS_SCRIPT_URL,{
-      method:'POST',
-      mode:'no-cors',
-      headers:{'Content-Type':'text/plain'},
-      body:JSON.stringify(payload)
-    });
-    // En mode no-cors on ne peut pas lire la réponse, mais l'envoi s'effectue
-    alert('✅ Rapport envoyé par email !\n\n📧 Client : '+emailClient+'\n👷 '+resp.nom+' : '+emailResp);
+    await qAdd(item);
+  }catch(e){
+    // IndexedDB indisponible (navigation privée...) : envoi direct, sans filet
+    console.error('File d\'attente indisponible:',e);
+    try{
+      await sendItem(item);
+      alert(wa?'✅ Rapport archivé.\n\n👷 Copie envoyée à '+resp.nom:'✅ Rapport envoyé par email !\n\n📧 Client : '+emailTo+(emailCc?'\n👷 '+resp.nom+' : '+emailCc:''));
+    }catch(err){
+      alert('❌ Envoi impossible : '+err.message+'\n\nLe PDF va être téléchargé, envoyez-le depuis votre application mail.');
+      _fallbackEmail(blob,filename,emailTo,emailCc,subject,corps);
+    }
+    return;
+  }
+  queueCount=(await qAll()).length;
+  renderQueue();
+
+  // 2. Puis on tente l'envoi tout de suite
+  var btn=document.getElementById('btn-gen');
+  if(!navigator.onLine){
+    alert(wa
+      ? '📴 Pas de réseau.\n\nLe PDF a été partagé sur WhatsApp depuis votre téléphone.\nL\'archivage (Drive + registre + copie '+resp.nom+') se fera TOUT SEUL dès que le téléphone captera.'
+      : '📴 Pas de réseau.\n\nLe rapport N° '+item.meta.num+' est enregistré et partira TOUT SEUL dès que le téléphone captera.\n\n➡️ Vous pouvez fermer l\'appli et enchaîner le chantier suivant.');
+    return;
+  }
+  if(btn)btn.textContent='⏳ Envoi en cours...';
+  try{
+    await sendItem(item);
+    await qDel(item.id);
+    queueCount=(await qAll()).length;renderQueue();
+    alert(wa
+      ? '✅ Rapport archivé (Drive + registre).\n\n👷 Copie envoyée à '+resp.nom+'\n💬 Le client le reçoit par WhatsApp.'
+      : '✅ Rapport envoyé par email !\n\n📧 Client : '+emailTo+(emailCc?'\n👷 '+resp.nom+' : '+emailCc:''));
   }catch(err){
     console.error('Erreur envoi:',err);
-    alert('⚠️ Impossible d\'envoyer automatiquement.\nTentative d\'envoi via votre application mail...');
-    _fallbackEmail(blob,filename,emailClient,emailResp,subject,corps);
+    var it=await qGet(item.id);
+    if(it){it.tries=1;it.lastError=err.message;it.lastTry=Date.now();try{await qPut(it);}catch(e){}}
+    renderQueue();
+    alert('⚠️ L\'envoi n\'a pas abouti ('+err.message+').\n\nLe rapport N° '+item.meta.num+' est conservé dans la file d\'attente et sera renvoyé automatiquement.\n\n➡️ Bandeau jaune en haut de l\'écran pour le suivre.');
   }
 }
 
@@ -1228,5 +1870,33 @@ loadState();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(function(){});
 initModalEvents();
 R();
+
+/* ── DÉCLENCHEURS DE RENVOI AUTOMATIQUE ──
+   La file est vidée : à l'ouverture de l'appli, au retour du réseau,
+   quand le chef d'équipe revient sur l'appli, et toutes les 60 s. */
+qAll().then(function(items){queueCount=items.length;renderQueue();if(items.length)flushQueue(true);});
+refillReserve();
+chargerChefs(); // liste du personnel à jour (onglet "Personnel" du registre)
+
+window.addEventListener('online',function(){
+  renderQueue();
+  refillReserve();
+  chargerChefs();
+  flushQueue(); // notification si des rapports repartent
+});
+window.addEventListener('offline',renderQueue);
+
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='visible'&&navigator.onLine)flushQueue(true);
+});
+
+setInterval(function(){
+  if(queueCount&&navigator.onLine&&!flushing)flushQueue(true);
+},60000);
+
+// Avertit si le chef d'équipe ferme l'appli avec des rapports non envoyés
+window.addEventListener('beforeunload',function(e){
+  if(queueCount>0){e.preventDefault();e.returnValue='';}
+});
 </script>
 </body></html>
